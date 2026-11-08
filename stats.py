@@ -29,6 +29,8 @@ class Overall:
     kda: float | None = None
     souls_per_min: float | None = None
     top_heroes: list[HeroLine] = field(default_factory=list)
+    streak: int = 0            # consecutive wins or losses, most recent match first
+    streak_won: bool | None = None
 
     @property
     def winrate(self) -> float | None:
@@ -70,4 +72,13 @@ def compute_overall(matches: list[Match], top_n: int = 5) -> Overall:
     lines = [HeroLine(h, g, wins[h]) for h, g in games.items()]
     lines.sort(key=lambda h: (-h.games, -h.wins))
     o.top_heroes = lines[:top_n]
+
+    for m in ms:  # newest first: count consecutive wins/losses from the most recent match
+        if m.won is None:
+            break
+        if o.streak_won is None:
+            o.streak_won = m.won
+        if m.won != o.streak_won:
+            break
+        o.streak += 1
     return o

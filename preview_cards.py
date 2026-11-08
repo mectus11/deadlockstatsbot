@@ -26,6 +26,7 @@ names = ["Infernus", "Seven", "Vindicta", "Lady Geist", "Abrams", "Haze"]
 history = [Match(100 + i, hero_id=[1, 1, 2, 3, 1, 4, 5, 2, 6, 1][i % 10], duration_s=1800 + i * 37,
                  kills=6 + i % 9, deaths=3 + i % 6, assists=5 + i % 11, net_worth=30000 + i * 900,
                  won=(i % 3 != 0)) for i in range(48)]
+history[0].won = history[1].won = history[2].won = history[3].won = True  # demo a current win streak
 o = compute_overall(history)
 rows = [cards.HeroRow(names[h.hero_id - 1], h.games, h.winrate, fake_icon(h.hero_id, tall=True)) for h in o.top_heroes]
 
@@ -49,9 +50,10 @@ common = dict(name="ExamplePlayer", hero="Infernus", match_id=41525919, kills=11
               duration_s=2174, start_time=1757346341, net_worth=48210, last_hits=212, denies=14)
 save("match.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items, own_lobby_rank="Oracle 5",
-    enemy_lobby_rank="Oracle 3", statlocker=True, **common)))
+    enemy_lobby_rank="Oracle 3", rank_name="Oracle 4", pp_score=4250, pp_delta=86, statlocker=True, **common)))
 save("match_loss_few_items.png", cards.render_match_card(cards.MatchCardData(
-    won=False, hero_icon=fake_icon(2), items=items[:5], unnamed_items=2, **common)))
+    won=False, hero_icon=fake_icon(2), items=items[:5], unnamed_items=2,
+    rank_name="Archon 3", pp_score=3690, pp_delta=-54, statlocker=True, **common)))
 save("match_sparse.png", cards.render_match_card(cards.MatchCardData(
     name="Account 123456789", hero="Hero #99", match_id=1, won=None, kills=None, deaths=None, assists=None,
     duration_s=None, start_time=None, net_worth=None, last_hits=None, denies=None)))

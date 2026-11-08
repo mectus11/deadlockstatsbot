@@ -10,6 +10,8 @@ class Link:
     account_id: int
     last_match_id: int
     display_name: str | None = None
+    last_pp_score: int | None = None
+    last_rank_number: int | None = None
 
 
 class DB:
@@ -31,10 +33,11 @@ class DB:
             );
             """
         )
-        try:  # migration for databases created before display_name existed
-            self.conn.execute("ALTER TABLE links ADD COLUMN display_name TEXT")
-        except sqlite3.OperationalError:
-            pass
+        for col in ("display_name TEXT", "last_pp_score INTEGER", "last_rank_number INTEGER"):
+            try:  # migration for databases created before these columns existed
+                self.conn.execute(f"ALTER TABLE links ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
 
     # --- links -----------------------------------------------------------
@@ -54,6 +57,14 @@ class DB:
             "SELECT * FROM links WHERE discord_id=? AND guild_id=?", (discord_id, guild_id)
         ).fetchone()
         return Link(**dict(r)) if r else None
+
+    def set_rank_baseline(self, discord_id: int, guild_id: int, pp_score: int | None, rank_number: int | None) -> None:
+        """Remembers the PP/rank last seen for this account, so the next match card can show the change."""
+        self.conn.execute(
+            "UPDATE links SET last_pp_score=?, last_rank_number=? WHERE discord_id=? AND guild_id=?",
+            (pp_score, rank_number, discord_id, guild_id),
+        )
+        self.conn.commit()
 
     def delete_link(self, discord_id: int, guild_id: int) -> bool:
         cur = self.conn.execute(

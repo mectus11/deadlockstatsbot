@@ -50,6 +50,7 @@ class StatsBot(discord.Client):
         self.session: aiohttp.ClientSession | None = None
 
     async def setup_hook(self):
+        log.info("starting — build %s", os.getenv("BUILD_SHA", "dev"))
         self.session = aiohttp.ClientSession(headers={"User-Agent": "deadlockstatsbot/2.0"})
         self.dl = DeadlockAPI(self.session, os.getenv("DEADLOCK_API_KEY") or None)
         self.sl = StatlockerAPI(self.session, os.getenv("STATLOCKER_API_KEY") or None)
@@ -105,9 +106,19 @@ class StatsBot(discord.Client):
         detail = await self.dl.match_detail(m.match_id, account_id)
         return merge_match(m, detail) if detail else m
 
-    async def render_match(self, account_id: int, m: Match, fallback_name: str | None = None):
+    async def render_match(self, account_id: int, m: Match, fallback_name: str | None = None,
+                           track: tuple[int, int] | None = None):
+        """track=(discord_id, guild_id): compares PP to the value stored for this player's own
+        account and remembers the new one, so the next match card can show the change. Only pass
+        this for the player's own card, never someone else's steamid."""
         profile = await self.sl.profile(account_id) if self.sl.enabled else None
         lobby = await self.sl.lobby(m.match_id, account_id) if self.sl.enabled else None
+        pp_delta = None
+        if track and profile and profile.pp_score is not None:
+            baseline = self.db.get_link(*track)
+            if baseline and baseline.last_pp_score is not None:
+                pp_delta = profile.pp_score - baseline.last_pp_score
+            self.db.set_rank_baseline(*track, profile.pp_score, profile.rank_number)
         heroes, catalogue = await asyncio.gather(self.dl.heroes(), self.dl.items())
         hero = heroes.get(m.hero_id)
         # the items catalogue also lists hero ability upgrades (spent with ability points, not bought
@@ -130,6 +141,9 @@ class StatsBot(discord.Client):
             unnamed_items=unknown,
             own_lobby_rank=rank_name(lobby.own_rank) if lobby else None,
             enemy_lobby_rank=rank_name(lobby.enemy_rank) if lobby else None,
+            rank_name=rank_name(profile.rank_number) if profile else None,
+            pp_score=profile.pp_score if profile else None,
+            pp_delta=pp_delta,
             statlocker=bool(profile or lobby),
         ))
 
@@ -137,28 +151,44 @@ class StatsBot(discord.Client):
     @tasks.loop(seconds=120)
     async def poll_matches(self):
         histories: dict[int, list[Match]] = {}  # one fetch per account per cycle
-        for link in self.db.all_links():
+        links = self.db.all_links()
+        log.info("poll cycle: checking %d linked account(s)", len(links))
+        for link in links:
             try:
                 channel_id = self.db.get_channel(link.guild_id)
-                channel = self.get_channel(channel_id) if channel_id else None
+                if channel_id is None:
+                    log.info("skip account %s: no channel set for guild %s (run /setchannel)",
+                            link.account_id, link.guild_id)
+                    continue
+                channel = self.get_channel(channel_id)
                 if channel is None:
+                    log.warning("skip account %s: channel %s not found/visible to the bot (guild %s) — "
+                               "check it still exists and the bot can see it", link.account_id, channel_id,
+                               link.guild_id)
                     continue
                 if link.account_id not in histories:
                     histories[link.account_id] = await self.dl.match_history(link.account_id)
                     await asyncio.sleep(1)  # be gentle with the API
                 new = sorted((m for m in histories[link.account_id] if m.match_id > link.last_match_id),
                              key=lambda m: m.match_id)  # oldest first
+                log.info("account %s: %d matches fetched, %d newer than last_match_id=%s",
+                        link.account_id, len(histories[link.account_id]), len(new), link.last_match_id)
                 last_posted = None
                 for m in new[-MAX_AUTOPOST_PER_CYCLE:]:
                     full = await self.load_match(link.account_id, m)
                     key = (link.discord_id, link.guild_id, m.match_id)
                     if not full.items and self.waits[key] < MAX_WAIT_FOR_ITEMS:
                         self.waits[key] += 1  # item data lags the match; retry next cycle, keep order
+                        log.info("match %s: no item data yet (attempt %d/%d), waiting",
+                                m.match_id, self.waits[key], MAX_WAIT_FOR_ITEMS)
                         break
                     self.waits.pop(key, None)
+                    log.info("posting match %s for account %s to channel %s", m.match_id, link.account_id,
+                             channel_id)
                     await channel.send(
                         content=f"<@{link.discord_id}> just finished a match",
-                        file=discord.File(await self.render_match(link.account_id, full, link.display_name),
+                        file=discord.File(await self.render_match(link.account_id, full, link.display_name,
+                                                                   track=(link.discord_id, link.guild_id)),
                                           filename=f"match_{m.match_id}.png"),
                         allowed_mentions=discord.AllowedMentions(users=[discord.Object(link.discord_id)]))
                     last_posted = m.match_id
@@ -287,7 +317,8 @@ async def latestmatch(interaction: discord.Interaction, steamid: str | None = No
     history = await bot.dl.match_history(acc)
     if not history:
         return await interaction.followup.send("No matches found for that account.")
-    png = await bot.render_match(acc, await bot.load_match(acc, history[0]), fallback_name=name)
+    track = (interaction.user.id, interaction.guild_id) if steamid is None else None  # never track on someone else's card
+    png = await bot.render_match(acc, await bot.load_match(acc, history[0]), fallback_name=name, track=track)
     await interaction.followup.send(file=discord.File(png, filename="latest_match.png"))
 
 

@@ -12,6 +12,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Which commit this image was built from, so the logs can confirm a redeploy actually picked up
+# a new image rather than restarting the old one (GitHub Actions passes this automatically).
+ARG BUILD_SHA=dev
+ENV BUILD_SHA=$BUILD_SHA
+
 # Everything the bot writes lives under /app/data and /app/cache, both volumes
 # (see docker-compose.yml) so it survives a rebuild/restart.
 ENV DB_PATH=/app/data/bot.db \

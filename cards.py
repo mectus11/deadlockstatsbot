@@ -121,6 +121,20 @@ class Canvas:
         self.d.ellipse((X - 0.35 * br - hl, by - 0.1 * br - hl, X - 0.35 * br + hl, by - 0.1 * br + hl),
                        fill=(205, 246, 252))
 
+    def pill(self, x, y, txt, color, size=12) -> float:
+        """Small rounded badge (e.g. a win/loss streak); returns its width."""
+        w, h = self.text_w(txt, size, True) + 16, size + 10
+        self.rect(x, y, w, h, fill=tuple(int(v * 0.22) for v in color), r=h / 2, outline=color, width=1)
+        self.text(x + w / 2, y + h / 2, txt, size, color, True, "mm")
+        return w
+
+    def tri(self, cx, cy, size, up: bool, color):
+        """A small filled up/down triangle (for a rank/PP change) — drawn, no icon file needed."""
+        s, h = self.s, size * 0.9
+        pts = [(cx, cy - h / 2), (cx - size / 2, cy + h / 2), (cx + size / 2, cy + h / 2)] if up else \
+              [(cx, cy + h / 2), (cx - size / 2, cy - h / 2), (cx + size / 2, cy - h / 2)]
+        self.d.polygon([(px * s, py * s) for px, py in pts], fill=color)
+
     def icon(self, data: bytes | None, x, y, w, h, r=10, border=None, label="", focus=(0.5, 0.5), bg=PANEL_LINE,
              fit="cover"):
         """Rounded image tile; labelled placeholder if no image.
@@ -219,7 +233,11 @@ def render_stats_card(d: StatsCardData) -> io.BytesIO:
         c.text(123, 105, (d.name[:1] or "?").upper(), 44, MUTED, True, "mm")
     has_badge = d.rank_badge is not None
     c.text(196, 62, c.fit(d.name, 36, True, 960 - 40 - (120 if has_badge else 0) - 196), 36, TEXT, True)
-    c.text(196, 112, f"Last {o.matches} matches  |  Account {d.account_id}", 15, MUTED)
+    line2 = f"Last {o.matches} matches  |  Account {d.account_id}"
+    c.text(196, 112, line2, 15, MUTED)
+    if o.streak >= 2:  # a streak of 1 isn't worth calling out
+        col = GREEN if o.streak_won else RED
+        c.pill(196 + c.text_w(line2, 15) + 14, 103, f"{'W' if o.streak_won else 'L'}{o.streak}", col)
     if d.rank_name:
         c.text(196, 138, d.rank_name + (f"  -  PP {d.pp_score}" if d.pp_score else ""), 16, GREEN, True)
     if has_badge:
@@ -290,6 +308,9 @@ class MatchCardData:
     unnamed_items: int = 0  # bought, but no catalogue entry to show
     own_lobby_rank: str | None = None
     enemy_lobby_rank: str | None = None
+    rank_name: str | None = None        # player's own current rank (e.g. "Archon 3")
+    pp_score: int | None = None
+    pp_delta: int | None = None         # change since the last match tracked for this player
     statlocker: bool = False
 
 
@@ -310,7 +331,17 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     c.icon(d.hero_icon, 68, 45, 100, 100, r=14, border=color, label=d.hero, focus=(0.5, 0.3))
     c.text(194, 40, "VICTORY" if d.won is True else "DEFEAT" if d.won is False else "MATCH", 40, color, True)
     c.text(194, 90, c.fit(d.hero, 22, True, 400), 22, TEXT, True)
-    c.text(194, 122, f"Match #{d.match_id}", 14, MUTED)
+    info = f"Match #{d.match_id}"
+    c.text(194, 122, info, 14, MUTED)
+    x = 194 + c.text_w(info, 14) + 10
+    if d.rank_name:
+        rank_txt = d.rank_name + (f"  · {d.pp_score} PP" if d.pp_score is not None else "")
+        c.text(x, 122, rank_txt, 14, MUTED, True)
+        x += c.text_w(rank_txt, 14, True) + 8
+        if d.pp_delta:
+            up, col = d.pp_delta > 0, GREEN if d.pp_delta > 0 else RED
+            c.tri(x + 5, 119, 9, up, col)
+            c.text(x + 14, 122, f"{'+' if up else ''}{d.pp_delta}", 13, col, True)
     right = 960 - 28
     if d.avatar:
         c.avatar(d.avatar, 960 - 28 - 64, 48, 64)

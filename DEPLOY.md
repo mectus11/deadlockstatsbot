@@ -1,4 +1,13 @@
-# Deploying to an OVH Ubuntu VPS with Docker
+# Deploying with Docker
+
+Two ways to run this, depending on what you have:
+
+- **A VPS with SSH access** — follow the steps below; updates are `git pull` + `docker compose up -d --build`.
+- **The OVH "Custom Docker image" game panel** (no shell, just the web UI) — see
+  [Updating the OVH panel deployment](#updating-the-ovh-panel-deployment) at the bottom instead; the build
+  steps below don't apply there.
+
+## Deploying to an OVH Ubuntu VPS with Docker
 
 ## 1. Get Docker onto the VPS
 
@@ -77,3 +86,26 @@ Look for the Discord login confirmation (`^C` to stop watching, it keeps running
 - `./assets/items/` — your own icons, mounted read-only into the container so you can edit them on the
   VPS directly.
 - `.env` — never commit this to git or put it in the zip you move around; it holds your bot token.
+
+## Updating the OVH panel deployment
+
+GitHub Actions already rebuilds and publishes the image to `ghcr.io/<you>/deadlockstatsbot:latest`
+automatically on every push to `main` (`.github/workflows/docker-publish.yml`). What a plain web panel
+usually does **not** do on its own is notice that a new image was published and re-pull it — a "Restart"
+button in most such panels restarts the *existing* container image, it doesn't fetch a new one. So the loop
+is:
+
+1. Push your code change to GitHub.
+2. Check the **Actions** tab on your repo — wait for the green checkmark (a minute or two).
+3. In the OVH panel, look for whatever action re-pulls the image rather than just restarting the running
+   one — often called **Reinstall**, **Redeploy**, or similar (as opposed to plain **Restart**/**Stop+Start**).
+   Your `/app/data` volume keeps your saved accounts and channel either way, so this is safe to use.
+4. **Confirm it actually updated** by checking the logs for the new startup line:
+   `starting — build <commit sha>`. Compare that short SHA to the latest commit on GitHub (Actions tab, or
+   the repo's commit history) — if they match, the panel picked up the new image; if the log still shows an
+   old or `dev` SHA, that button didn't actually re-pull, and you'll need to look for the right one in the
+   panel (or ask its support/docs) or delete-and-reinstall the server.
+
+There's no way to make this fully automatic without shell access to the host (that needs a sidecar like
+Watchtower watching Docker directly, which a web-panel-only setup doesn't expose) — but steps 1–4 are a
+five-minute loop, not a redeploy from scratch.

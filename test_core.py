@@ -160,6 +160,15 @@ class Stats(unittest.TestCase):
         self.assertAlmostEqual(o.souls_per_min, (1200 + 600 + 600) / 3)
         self.assertEqual(o.top_heroes[0].hero_id, 1)
         self.assertEqual(o.top_heroes[0].games, 2)
+        self.assertEqual((o.streak, o.streak_won), (1, True))  # newest match won, then a loss breaks it
+
+    def test_streaks(self):
+        win_streak = compute_overall([Match(i, won=True) for i in range(3, 0, -1)])
+        self.assertEqual((win_streak.streak, win_streak.streak_won), (3, True))
+        loss_streak = compute_overall([Match(3, won=False), Match(2, won=False), Match(1, won=True)])
+        self.assertEqual((loss_streak.streak, loss_streak.streak_won), (2, False))
+        unknown = compute_overall([Match(2, won=None), Match(1, won=True)])
+        self.assertEqual((unknown.streak, unknown.streak_won), (0, None))  # most recent result missing
 
     def test_empty_and_no_deaths(self):
         o = compute_overall([])
@@ -219,6 +228,8 @@ class Database(unittest.TestCase):
             db.set_channel(10, 100)
             self.assertEqual(db.get_channel(10), 100)
             self.assertIsNone(db.get_channel(11))
+            db.set_rank_baseline(1, 10, 4250, 84)
+            self.assertEqual((db.get_link(1, 10).last_pp_score, db.get_link(1, 10).last_rank_number), (4250, 84))
             self.assertTrue(db.delete_link(1, 10))
             self.assertFalse(db.delete_link(1, 10))
             db.conn.close()

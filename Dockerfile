@@ -25,8 +25,10 @@ ENV DB_PATH=/app/data/bot.db \
     PYTHONUNBUFFERED=1
 RUN mkdir -p /app/data /app/cache
 
-# Runs as its own user, not root
-RUN useradd -m bot && chown -R bot:bot /app
-USER bot
-
-CMD ["python", "bot.py"]
+# Runs as root (the default for most container panels, including the one hosting this), not a
+# custom user: a mounted volume's write permissions are controlled by the host/panel, not the
+# image, so a baked-in non-root user here can end up unable to write to it. At startup, also
+# create whatever directory DB_PATH/CACHE_DIR actually point at (they may be overridden by an
+# env var to a different mount, e.g. a panel's own /data), in case that directory doesn't exist
+# yet on a fresh volume.
+CMD ["sh", "-c", "mkdir -p \"$(dirname \"$DB_PATH\")\" \"$CACHE_DIR\" && exec python bot.py"]

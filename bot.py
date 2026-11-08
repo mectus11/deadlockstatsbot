@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 from collections import defaultdict
+from pathlib import Path
 
 import aiohttp
 import discord
@@ -44,7 +45,12 @@ class StatsBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
-        self.db = DB(os.getenv("DB_PATH", "bot.db"))
+        
+        # Ensure the database directory exists before initializing DB
+        db_path = os.getenv("DB_PATH", "bot.db")
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        
+        self.db = DB(db_path)
         self.poll_seconds = max(30, int(os.getenv("POLL_SECONDS", "120")))
         self.waits: dict[tuple, int] = defaultdict(int)  # (user, guild, match) -> cycles waited for items
         self.session: aiohttp.ClientSession | None = None

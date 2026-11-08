@@ -1,6 +1,7 @@
 """Tiny SQLite storage (stdlib only)."""
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -16,6 +17,9 @@ class Link:
 
 class DB:
     def __init__(self, path: str):
+        # Ensure the parent directory exists before connecting to avoid 'unable to open database file' errors
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(

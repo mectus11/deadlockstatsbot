@@ -1,0 +1,21 @@
+services:
+  deadlockstatsbot:
+    build: .
+    container_name: deadlockstatsbot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # these always win over the same keys in .env, so a Windows .env you reuse here (which sets
+      # DB_PATH=bot.db, a relative path) can't silently break the volumes below
+      DB_PATH: /app/data/bot.db
+      CACHE_DIR: /app/cache
+      LOCAL_ITEM_ICONS: /app/assets/items
+    volumes:
+      - ./data:/app/data          # bot.db (links, channels)
+      - ./cache:/app/cache        # downloaded hero/item pictures
+      - ./assets/items:/app/assets/items:ro   # your own item icons; edit on the host, no rebuild needed
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,88 @@
+"""Tiny SQLite storage (stdlib only)."""
+import sqlite3
+from dataclasses import dataclass
+
+
+@dataclass
+class Link:
+    discord_id: int
+    guild_id: int
+    account_id: int
+    last_match_id: int
+    display_name: str | None = None
+
+
+class DB:
+    def __init__(self, path: str):
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS links (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                last_match_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (discord_id, guild_id)
+            );
+            CREATE TABLE IF NOT EXISTS channels (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL
+            );
+            """
+        )
+        try:  # migration for databases created before display_name existed
+            self.conn.execute("ALTER TABLE links ADD COLUMN display_name TEXT")
+        except sqlite3.OperationalError:
+            pass
+        self.conn.commit()
+
+    # --- links -----------------------------------------------------------
+    def set_link(self, discord_id: int, guild_id: int, account_id: int, last_match_id: int,
+                 display_name: str | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO links (discord_id, guild_id, account_id, last_match_id, display_name) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(discord_id, guild_id) DO UPDATE SET "
+            "account_id=excluded.account_id, last_match_id=excluded.last_match_id, "
+            "display_name=COALESCE(excluded.display_name, links.display_name)",
+            (discord_id, guild_id, account_id, last_match_id, display_name),
+        )
+        self.conn.commit()
+
+    def get_link(self, discord_id: int, guild_id: int) -> Link | None:
+        r = self.conn.execute(
+            "SELECT * FROM links WHERE discord_id=? AND guild_id=?", (discord_id, guild_id)
+        ).fetchone()
+        return Link(**dict(r)) if r else None
+
+    def delete_link(self, discord_id: int, guild_id: int) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM links WHERE discord_id=? AND guild_id=?", (discord_id, guild_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def all_links(self) -> list[Link]:
+        return [Link(**dict(r)) for r in self.conn.execute("SELECT * FROM links")]
+
+    def update_last_match(self, discord_id: int, guild_id: int, match_id: int) -> None:
+        self.conn.execute(
+            "UPDATE links SET last_match_id=? WHERE discord_id=? AND guild_id=?",
+            (match_id, discord_id, guild_id),
+        )
+        self.conn.commit()
+
+    # --- channels --------------------------------------------------------
+    def set_channel(self, guild_id: int, channel_id: int) -> None:
+        self.conn.execute(
+            "INSERT INTO channels (guild_id, channel_id) VALUES (?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id",
+            (guild_id, channel_id),
+        )
+        self.conn.commit()
+
+    def get_channel(self, guild_id: int) -> int | None:
+        r = self.conn.execute(
+            "SELECT channel_id FROM channels WHERE guild_id=?", (guild_id,)
+        ).fetchone()
+        return r["channel_id"] if r else None

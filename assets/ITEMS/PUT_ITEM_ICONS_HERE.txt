@@ -1,0 +1,2 @@
+Optional: put your own item icons here (png/webp/jpg), named after the item, e.g. Basic Magazine.png
+They are used instead of the downloaded ones. Restart the bot after adding files.

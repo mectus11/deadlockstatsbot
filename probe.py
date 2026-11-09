@@ -15,10 +15,12 @@ from PIL import Image
 import os
 
 from deadlock_api import BASE
+from local_icons import LocalIcons
 from models import (HERO_IMAGE_KEYS, ITEM_IMAGE_KEYS, normalize_entry, normalize_metadata, parse_assets)
 from steam import parse_steam_input
 
 load_dotenv()
+SHOP_SLOTS = {"weapon", "vitality", "spirit"}  # mirrors bot.py: ability upgrades are never shown on cards
 
 
 def show(title, obj, limit=900):
@@ -89,6 +91,42 @@ async def main(steamid):
                 found = [parsed.get(b.item_id) for b in m.items]
                 print(f"  your {len(m.items)} items: {sum(1 for f in found if f)} found in the catalogue")
                 await check_image(s, "your first item image", next((f.image for f in found if f), None))
+            if kind == "items":
+                await check_local_items(parsed)
+
+
+async def check_local_items(catalogue):
+    folder = os.getenv("LOCAL_ITEM_ICONS", "assets/items")
+    local = LocalIcons(folder)
+    print(f"\n=== local item icons in {folder!r}: {len(local.files)} file(s) loaded")
+    if not local.files:
+        print("  No files loaded. Either the folder doesn't exist here, has no .png/.webp/.jpg/.jpeg files,")
+        print("  or (if running in Docker) LOCAL_ITEM_ICONS points somewhere the files weren't actually copied to.")
+        return
+
+    shop_items = {a.id: a for a in catalogue.values() if a.slot in SHOP_SLOTS}  # ability upgrades never shown
+    matched_keys = set()
+    missing = []
+    for a in shop_items.values():
+        key = local.match_key(a.name, a.tier)
+        if key:
+            matched_keys.add(key)
+        else:
+            missing.append(a.name)
+    print(f"  {len(shop_items) - len(missing)}/{len(shop_items)} real (shop) catalogue items have a matching local icon")
+    if missing:
+        print(f"  catalogue items with NO local icon ({len(missing)}): {', '.join(sorted(missing)[:40])}"
+             + (" ..." if len(missing) > 40 else ""))
+
+    orphans = [str(p) for key, p in local.files.items() if key not in matched_keys]
+    print(f"  local files that matched NO catalogue item ({len(orphans)}):")
+    for o in sorted(orphans)[:40]:
+        print(f"    {o}")
+    if len(orphans) > 40:
+        print(f"    ... and {len(orphans) - 40} more")
+    if orphans:
+        print("  Each one above is either misnamed (compare it to the matching entry under 'catalogue items")
+        print("  with NO local icon'), or isn't a real Deadlock item at all (e.g. art from a generic icon pack).")
 
 
 if len(sys.argv) < 2:

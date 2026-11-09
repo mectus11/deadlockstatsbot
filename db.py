@@ -1,7 +1,7 @@
 """Tiny SQLite storage (stdlib only)."""
+import os
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 
 
 @dataclass
@@ -17,10 +17,27 @@ class Link:
 
 class DB:
     def __init__(self, path: str):
-        # Ensure the parent directory exists before connecting to avoid 'unable to open database file' errors
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        
-        self.conn = sqlite3.connect(path)
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)  # in case this directory doesn't exist yet (e.g. a fresh volume)
+        try:
+            self.conn = sqlite3.connect(path)
+        except sqlite3.OperationalError:
+            # print (not log: logging may not be configured yet this early) exactly why, so a
+            # deploy that still can't open the database says more than "unable to open database file"
+            print(f"[diag] could not open sqlite db at {path!r} (directory {directory!r})", flush=True)
+            print(f"[diag] running as uid={os.getuid()} gid={os.getgid()}", flush=True)
+            try:
+                print(f"[diag] directory contents: {os.listdir(directory)}", flush=True)
+            except OSError as e:
+                print(f"[diag] could not list {directory!r}: {e}", flush=True)
+            test_file = os.path.join(directory, ".write_test")
+            try:
+                open(test_file, "w").close()
+                os.remove(test_file)
+                print(f"[diag] {directory!r} IS writable by this process", flush=True)
+            except OSError as e:
+                print(f"[diag] {directory!r} is NOT writable by this process: {e}", flush=True)
+            raise
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(
             """

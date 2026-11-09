@@ -12,7 +12,6 @@ import asyncio
 import logging
 import os
 from collections import defaultdict
-from pathlib import Path
 
 import aiohttp
 import discord
@@ -45,12 +44,7 @@ class StatsBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
-        
-        # Ensure the database directory exists before initializing DB
-        db_path = os.getenv("DB_PATH", "bot.db")
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        self.db = DB(db_path)
+        self.db = DB(os.getenv("DB_PATH", "bot.db"))
         self.poll_seconds = max(30, int(os.getenv("POLL_SECONDS", "120")))
         self.waits: dict[tuple, int] = defaultdict(int)  # (user, guild, match) -> cycles waited for items
         self.session: aiohttp.ClientSession | None = None
@@ -63,7 +57,9 @@ class StatsBot(discord.Client):
         self.images = ImageStore(self.session, os.getenv("CACHE_DIR", "cache"))
         self.local = LocalIcons(os.getenv("LOCAL_ITEM_ICONS", "assets/items"))
         if self.local.files:
-            log.info("Using %d local item icons from assets/items", len(self.local.files))
+            log.info("Using %d local item icons from %s", len(self.local.files),
+                     os.getenv("LOCAL_ITEM_ICONS", "assets/items"))
+            asyncio.create_task(self._log_local_icon_coverage())
         if not self.sl.enabled:
             log.warning("STATLOCKER_API_KEY not set: cards will show match data only.")
         await self.tree.sync()
@@ -76,6 +72,26 @@ class StatsBot(discord.Client):
         await super().close()
 
     # --- card building ------------------------------------------------------
+    async def _log_local_icon_coverage(self):
+        """Runs once at startup: how many of your assets/items files actually match a real
+        Deadlock item, so a naming/folder problem shows up in the logs without running probe.py."""
+        try:
+            catalogue = await self.dl.items()
+        except Exception:
+            return  # network hiccup at boot; not worth logging as an error
+        if not catalogue:
+            return
+        shop = {a.id: a for a in catalogue.values() if a.slot in SHOP_SLOTS}
+        found_keys = [self.local.match_key(a.name, a.tier) for a in shop.values()]
+        matched = sum(1 for k in found_keys if k)
+        matched_keys = {k for k in found_keys if k}
+        orphans = [str(p.name) for key, p in self.local.files.items() if key not in matched_keys]
+        log.info("local item icons: %d/%d real shop items matched, %d local file(s) matched nothing",
+                 matched, len(shop), len(orphans))
+        if orphans:
+            log.info("unmatched local files (first 15, check names against the real item list): %s",
+                     ", ".join(sorted(orphans)[:15]))
+
     async def display_name(self, account_id: int, profile, fallback: str | None = None) -> str:
         if profile and profile.name:
             return profile.name

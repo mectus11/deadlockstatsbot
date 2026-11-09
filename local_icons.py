@@ -35,16 +35,18 @@ class LocalIcons:
                     continue
                 self.files.setdefault(norm(p.stem), p)
 
-    def get(self, item_name: str, tier: int | None = None) -> bytes | None:
+    def match_key(self, item_name: str, tier: int | None = None) -> str | None:
+        """Which key in self.files actually matches this item, if any (the tiered key, when
+        present, otherwise the plain one) — used by get(), and by callers checking coverage."""
         keys = [norm(f"{item_name} T{tier}"), norm(f"{item_name} {tier}")] if tier else []
         keys.append(norm(item_name))  # plain name is the fallback even for a tiered item
-        for k in keys:
-            p = self.files.get(k)
-            if p:
-                break
-        else:
+        return next((k for k in keys if k in self.files), None)
+
+    def get(self, item_name: str, tier: int | None = None) -> bytes | None:
+        key = self.match_key(item_name, tier)
+        if key is None:
             return None
         try:
-            return p.read_bytes()
+            return self.files[key].read_bytes()
         except OSError:
             return None

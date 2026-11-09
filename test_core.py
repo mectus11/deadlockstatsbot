@@ -138,6 +138,10 @@ class LocalIconFiles(unittest.TestCase):
             self.assertEqual(li.get("Hunter's Aura"), b"h")
             self.assertEqual(li.get("Toxic Bullets"), b"t")
             self.assertEqual(li.get("Titanic Magazine"), b"y")  # found in a subfolder
+            self.assertEqual(li.match_key("Trophy Collector", 2), norm("Trophy Collector T2"))
+            self.assertNotEqual(li.match_key("Trophy Collector", 2), norm("Trophy Collector"))  # regression:
+            # match_key must report the key actually used (tiered), not the bare item name — an orphan-icon
+            # report that only checked norm(name) would wrongly flag this legitimately-matched file
             self.assertEqual(li.get("Basic Magazine"), b"x")
             self.assertEqual(li.get("Extra Health"), b"x")
             self.assertEqual(li.get("Extra Health Regen"), b"x")
@@ -211,6 +215,13 @@ class StatlockerParsing(unittest.TestCase):
 
 
 class Database(unittest.TestCase):
+    def test_creates_missing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DB(os.path.join(tmp, "nested", "sub", "t.db"))  # directory doesn't exist yet
+            db.set_channel(1, 2)
+            self.assertEqual(db.get_channel(1), 2)
+            db.conn.close()
+
     def test_links_and_channels(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = DB(os.path.join(tmp, "t.db"))

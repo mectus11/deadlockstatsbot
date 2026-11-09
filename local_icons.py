@@ -8,9 +8,11 @@ tiers with one icon per tier (`Trophy Collector` tier II/III): name those
 `Trophy Collector T2.png` / `Trophy Collector_T3.png`; the bot tries the tiered name
 first, then falls back to the plain name. Local files win over downloaded pictures.
 """
+import logging
 import re
 from pathlib import Path
 
+log = logging.getLogger("local_icons")
 EXTS = {".png", ".webp", ".jpg", ".jpeg"}
 NOISE = re.compile(r"\b(icons?|items?|v\d+|deadlock|gameasset|shop|png|webp|psd)\b", re.I)
 
@@ -25,15 +27,38 @@ def _outdated(p: Path, root: Path) -> bool:
     return any(re.search(r"\bold\b", d, re.I) for d in parts[:-1]) or bool(re.search(r"[_ ]old$", p.stem, re.I))
 
 
+def _resolve_case_insensitive(folder: str) -> Path | None:
+    """Finds `folder` even if its case doesn't match the real directory on disk. Windows
+    filesystems are case-insensitive so a mismatch like assets/items vs assets/ITEMS is
+    invisible there, but Linux (e.g. inside Docker) is case-sensitive and would silently
+    find nothing — so every path segment is matched against the real directory listing."""
+    path = Path(folder)
+    if path.is_dir():
+        return path
+    cur = Path(path.anchor or ".")
+    for part in path.parts[1:] if path.anchor else path.parts:
+        if not cur.is_dir():
+            return None
+        match = next((e for e in cur.iterdir() if e.name.lower() == part.lower()), None)
+        if match is None:
+            return None
+        cur = match
+    return cur if cur.is_dir() else None
+
+
 class LocalIcons:
     def __init__(self, folder: str = "assets/items"):
         self.files: dict[str, Path] = {}
-        root = Path(folder)
-        if root.is_dir():
-            for p in sorted(root.rglob("*")):  # subfolders count too
-                if p.suffix.lower() not in EXTS or not norm(p.stem) or _outdated(p, root):
-                    continue
-                self.files.setdefault(norm(p.stem), p)
+        root = _resolve_case_insensitive(folder)
+        if root is None:
+            return
+        if root.name != Path(folder).name:
+            log.info("%r not found as-is; using %r instead (case differs — fine on Windows, "
+                     "but matters on Linux/Docker)", folder, str(root))
+        for p in sorted(root.rglob("*")):  # subfolders count too
+            if p.suffix.lower() not in EXTS or not norm(p.stem) or _outdated(p, root):
+                continue
+            self.files.setdefault(norm(p.stem), p)
 
     def match_key(self, item_name: str, tier: int | None = None) -> str | None:
         """Which key in self.files actually matches this item, if any (the tiered key, when

@@ -149,6 +149,17 @@ class LocalIconFiles(unittest.TestCase):
             self.assertIsNone(li.get("Unknown Item"))
         self.assertIsNone(LocalIcons("/nonexistent/folder").get("Basic Magazine"))
 
+    def test_folder_case_mismatch(self):
+        # Regression: files tracked in git as assets/ITEMS are invisible to a lowercase
+        # assets/items lookup on a case-sensitive filesystem (Linux/Docker), even though
+        # Windows hides the mismatch entirely. LocalIcons must still find them.
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "assets", "ITEMS")
+            os.makedirs(real)
+            open(os.path.join(real, "Trophy Collector.png"), "wb").write(b"t")
+            li = LocalIcons(os.path.join(d, "assets", "items"))  # lowercase, doesn't exist as-is
+            self.assertEqual(li.get("Trophy Collector"), b"t")
+
 
 class Stats(unittest.TestCase):
     def test_aggregates(self):

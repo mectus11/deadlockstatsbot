@@ -207,12 +207,13 @@ class StatsBot(discord.Client):
                     self.waits.pop(key, None)
                     log.info("posting match %s for account %s to channel %s", m.match_id, link.account_id,
                              channel_id)
+                    poster_name = link.display_name or f"Account {link.account_id}"
                     await channel.send(
-                        content=f"<@{link.discord_id}> just finished a match",
+                        content=f"**{poster_name}** just finished a match",
                         file=discord.File(await self.render_match(link.account_id, full, link.display_name,
                                                                    track=(link.discord_id, link.guild_id)),
                                           filename=f"match_{m.match_id}.png"),
-                        allowed_mentions=discord.AllowedMentions(users=[discord.Object(link.discord_id)]))
+                        allowed_mentions=discord.AllowedMentions.none())
                     last_posted = m.match_id
                 if last_posted:  # skipped older matches (beyond the cap) are not revisited
                     self.db.update_last_match(link.discord_id, link.guild_id, last_posted)

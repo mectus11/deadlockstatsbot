@@ -6,6 +6,7 @@ are tried, then Pillow's built-in font. Any image that is missing or can't be
 decoded is replaced by a labelled placeholder tile.
 """
 import io
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import ceil
@@ -14,6 +15,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from stats import Overall
+
+log = logging.getLogger("cards")
 
 BG = (11, 13, 15)
 PANEL = (21, 25, 29)
@@ -59,14 +62,19 @@ def _font(size: int, bold: bool) -> ImageFont.ImageFont:
     return _font_cache[key]
 
 
-def _load(data: bytes | None) -> Image.Image | None:
+def _load(data: bytes | None, label: str = "") -> Image.Image | None:
     if not data:
         return None
     try:
         im = Image.open(io.BytesIO(data))
         im.load()
         return im
-    except Exception:
+    except Exception as e:
+        # Surfaces in the bot's logs so a blank/placeholder icon can be told apart from a
+        # failed download (images.py logs that separately) vs. undecodable image bytes here
+        # (e.g. a Pillow build without WEBP support, or a genuinely corrupt/truncated file).
+        log.warning("could not decode image%s (%d bytes): %r", f" for {label}" if label else "",
+                   len(data), e)
         return None
 
 
@@ -142,7 +150,7 @@ class Canvas:
         whole image letterboxed (good for item icons, so none of the artwork gets cropped off)."""
         s = self.s
         tile = Image.new("RGBA", (w * s, h * s), bg + (255,))
-        im = _load(data)
+        im = _load(data, label)
         if im is not None:
             im = im.convert("RGBA")
             if fit == "contain":

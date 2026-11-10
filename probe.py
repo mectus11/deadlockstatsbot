@@ -61,6 +61,32 @@ async def main(steamid):
     async with aiohttp.ClientSession(headers=headers) as s:
         hist = await get(s, f"{BASE}/v1/players/{acc}/match-history")
         if isinstance(hist, list) and hist:
+            print(f"\n=== game_mode/match_mode across your last {min(10, len(hist))} matches "
+                  "(compare against which of these you remember as ranked/unranked/bot/street-brawl):")
+            for h in hist[:10]:
+                print(f"  match_id={h.get('match_id')} game_mode={h.get('game_mode')} "
+                      f"match_mode={h.get('match_mode')} start_time={h.get('start_time')}")
+
+            # survey a few different game_mode/match_mode combos for mode-detection signals
+            # (bot_difficulty / street_brawl_rounds should be unambiguous; ranked_type covers the rest)
+            seen_modes = set()
+            print("\n=== mode-detection fields per distinct game_mode/match_mode combo seen above:")
+            for h in hist[:10]:
+                key = (h.get("game_mode"), h.get("match_mode"))
+                if key in seen_modes:
+                    continue
+                seen_modes.add(key)
+                mm = await get(s, f"{BASE}/v1/matches/{h.get('match_id')}/metadata")
+                mi = mm.get("match_info", mm) if isinstance(mm, dict) else {}
+                if not isinstance(mi, dict):
+                    continue
+                plist = mi.get("players", [])
+                bots = sum(1 for p in plist if not p.get("account_id"))
+                print(f"  match_id={h.get('match_id')} game_mode={key[0]} match_mode={key[1]} "
+                      f"ranked_type={mi.get('ranked_type')} bot_difficulty={mi.get('bot_difficulty')} "
+                      f"street_brawl_rounds={mi.get('street_brawl_rounds')} bot_players={bots}/{len(plist)}")
+                await asyncio.sleep(0.3)
+
             show("first match-history entry (raw)", hist[0])
             print("parsed:", normalize_entry(hist[0]))
             mid = normalize_entry(hist[0]).match_id
@@ -68,10 +94,29 @@ async def main(steamid):
             if meta:
                 info = meta.get("match_info", meta) if isinstance(meta, dict) else {}
                 print("\n=== metadata keys:", sorted(info) if isinstance(info, dict) else type(info))
+                if isinstance(info, dict):
+                    print(f"  game_mode={info.get('game_mode')} match_mode={info.get('match_mode')} "
+                          f"ranked_type={info.get('ranked_type')} not_scored={info.get('not_scored')} "
+                          f"low_pri_pool={info.get('low_pri_pool')} new_player_pool={info.get('new_player_pool')}")
                 me = next((p for p in info.get("players", []) if p.get("account_id") == acc), None)
                 if me:
                     print("player keys:", sorted(me))
                     show("first 2 raw items of your player", (me.get("items") or [])[:2])
+                    stats_list = me.get("stats") or []
+                    print(f"\n=== your player 'stats': {len(stats_list)} time-series snapshot(s) "
+                          "(one every ~180s) — showing only the LAST one (end-of-match totals):")
+                    if stats_list:
+                        last = stats_list[-1]
+                        show("last stats snapshot, full content", last, 4000)
+                        print("keys in it:", sorted(last))
+                    show("your player 'player_tracked_stats'", me.get("player_tracked_stats"), 2500)
+                    show("your 'team' value", me.get("team"))
+                players = info.get("players", []) if isinstance(info, dict) else []
+                if players:
+                    print(f"\n=== all {len(players)} players in this match (team, kills, deaths, net_worth):")
+                    for p in players:
+                        print(f"  team={p.get('team')} acc={p.get('account_id')} kills={p.get('kills')} "
+                              f"deaths={p.get('deaths')} net_worth={p.get('net_worth')}")
                 m = normalize_metadata(meta, acc, mid)
                 print("parsed:", m)
         else:

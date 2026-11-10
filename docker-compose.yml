@@ -1,19 +1,25 @@
 services:
   deadlockstatsbot:
-    build: .
+    image: ghcr.io/mectus11/deadlockstatsbot:latest
+    # Always re-checks the registry and pulls a newer image on `docker compose up`, instead of
+    # silently reusing whatever was cached locally the first time (the exact problem that made
+    # the OVH panel's "restart" never pick up new code — this setting + `docker compose pull`
+    # below is what finally fixes that, since you're issuing the pull yourself over SSH).
+    pull_policy: always
     container_name: deadlockstatsbot
     restart: unless-stopped
     env_file: .env
     environment:
-      # these always win over the same keys in .env, so a Windows .env you reuse here (which sets
-      # DB_PATH=bot.db, a relative path) can't silently break the volumes below
+      # these always win over the same keys in .env, so a stray DB_PATH=bot.db (relative path)
+      # can't silently break persistence again
       DB_PATH: /app/data/bot.db
       CACHE_DIR: /app/cache
-      LOCAL_ITEM_ICONS: /app/assets/items
+      # not overriding LOCAL_ITEM_ICONS on purpose: your real icon files are committed to the git
+      # repo (as assets/ITEMS) and baked into the image on every build, so there's nothing to
+      # bind-mount from the host here — one less thing to keep in sync across two machines.
     volumes:
-      - ./data:/app/data          # bot.db (links, channels)
-      - ./cache:/app/cache        # downloaded hero/item pictures
-      - ./assets/items:/app/assets/items:ro   # your own item icons; edit on the host, no rebuild needed
+      - ./data:/app/data          # bot.db (links, channels) — the only thing that must persist
+      - ./cache:/app/cache        # downloaded hero/item pictures (safe to lose, just re-downloads)
     logging:
       driver: json-file
       options:

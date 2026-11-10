@@ -11,8 +11,8 @@ except ImportError:
 
 from db import DB
 from local_icons import LocalIcons, norm
-from models import (ItemBuy, Match, final_items, merge_match, normalize_entry, normalize_metadata,
-                    parse_assets, pick_image)
+from models import (BrawlRound, ItemBuy, Match, MatchStats, final_items, match_type, merge_match,
+                    normalize_entry, normalize_metadata, parse_assets, pick_image)
 from statlocker import parse_lobby, parse_profile, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import account_to_steam64, parse_steam_input
@@ -255,6 +255,120 @@ class Database(unittest.TestCase):
             self.assertTrue(db.delete_link(1, 10))
             self.assertFalse(db.delete_link(1, 10))
             db.conn.close()
+
+
+class MatchesCard(unittest.TestCase):
+    def test_renders_without_error(self):
+        import cards
+        data = cards.MatchesCardData(
+            name="Mectus", account_id=180817836,
+            matches=[
+                cards.MatchRow("Graves", True, 2, 6, 22, 133810241, 1794163216, 3067,
+                               mode="Ranked", mode_kind="ranked"),
+                cards.MatchRow("Seven", False, 10, 8, 5, 133800000, 1794150000, 1800,
+                               mode="Brawl", mode_kind="brawl"),
+                cards.MatchRow("Unknown", None, None, None, None, None, None, None),  # unfinished/missing data
+            ],
+        )
+        png = cards.render_matches_card(data)
+        self.assertGreater(len(png.getvalue()), 0)
+
+    def test_renders_with_no_matches(self):
+        import cards
+        png = cards.render_matches_card(cards.MatchesCardData(name="Mectus", account_id=1))
+        self.assertGreater(len(png.getvalue()), 0)
+
+
+class MatchTypes(unittest.TestCase):
+    def test_labels_and_kinds(self):
+        cases = [
+            (Match(1, game_mode=1, match_mode=4), ("ranked", "Ranked")),
+            (Match(1, game_mode=1, match_mode=1), ("standard", "Standard")),
+            (Match(1, game_mode=1, match_mode=3, bot_difficulty=1), ("bot", "Bot Match · Easy")),
+            (Match(1, game_mode=4, match_mode=1), ("brawl", "Street Brawl")),
+            (Match(1, game_mode=4, match_mode=3, bot_difficulty=3), ("brawl", "Street Brawl · Hard Bots")),
+            (Match(1, game_mode=1, match_mode=2), ("other", "Private Lobby")),
+            (Match(1, game_mode=1, match_mode=8), ("other", "New Player")),
+            (Match(1), ("other", "Unknown")),  # old payloads without mode fields
+        ]
+        for match, want in cases:
+            self.assertEqual(match_type(match), want)
+
+    def test_history_entries_parse_mode_and_team(self):
+        m = normalize_entry({"match_id": 1, "game_mode": 4, "match_mode": 1, "player_team": 0})
+        self.assertEqual((m.game_mode, m.match_mode, m.team), (4, 1, 0))
+
+    def test_brawl_score_and_average(self):
+        m = Match(1, team=0, brawl_rounds=[BrawlRound(0, 100), BrawlRound(1, 120), BrawlRound(0, 90)])
+        self.assertEqual(m.brawl_score, (2, 1))
+        self.assertEqual(m.brawl_avg_round_s, 103)  # round(310/3)
+        self.assertIsNone(Match(1).brawl_score)
+        self.assertIsNone(Match(1, brawl_rounds=[BrawlRound(0, 100)]).brawl_score)  # no team to compare
+
+
+class MetadataStats(unittest.TestCase):
+    def test_picks_latest_snapshot_and_computes_rates(self):
+        data = {"match_info": {
+            "match_id": 1, "game_mode": 1, "match_mode": 4, "ranked_type": 0,
+            "players": [{
+                "account_id": 7, "hero_id": 2, "team": 1, "level": 24,
+                "stats": [
+                    {"time_stamp_s": 180, "player_damage": 100, "shots_hit": 1, "shots_missed": 1},
+                    {"time_stamp_s": 858, "player_damage": 17883, "shots_hit": 1913, "shots_missed": 1321,
+                     "hero_bullets_hit": 1759, "hero_bullets_hit_crit": 226, "bullet_kills": 9,
+                     "creep_kills": 31, "possible_creeps": 38},
+                    {"time_stamp_s": 400, "player_damage": 999},  # out of order on purpose
+                ],
+            }],
+        }}
+        m = normalize_metadata(data, 7, 1)
+        self.assertEqual((m.game_mode, m.match_mode, m.ranked_type, m.team), (1, 4, 0, 1))
+        self.assertEqual(m.level, 24)
+        self.assertEqual(m.stats.hero_damage, 17883)  # highest timestamp, not the last element
+        self.assertAlmostEqual(m.stats.accuracy, 1913 / 3234 * 100)
+        self.assertAlmostEqual(m.stats.crit_rate, 226 / 1759 * 100)
+
+    def test_missing_stats_is_none(self):
+        m = normalize_metadata({"match_info": {"players": [{"account_id": 7, "stats": []}]}}, 7, 1)
+        self.assertIsNone(m.stats)
+
+    def test_stats_rates_with_no_shots(self):
+        s = MatchStats(shots_hit=0, shots_missed=0)
+        self.assertIsNone(s.accuracy)
+        self.assertIsNone(s.crit_rate)
+        self.assertIsNone(MatchStats().accuracy)
+
+    def test_merge_keeps_history_mode_and_metadata_stats(self):
+        base = Match(1, game_mode=4, match_mode=1)
+        detail = Match(1, game_mode=1, match_mode=4, stats=MatchStats(hero_damage=5),
+                       brawl_rounds=[BrawlRound(0, 100)])
+        merged = merge_match(base, detail)
+        self.assertEqual((merged.game_mode, merged.match_mode), (4, 1))  # history wins
+        self.assertEqual(merged.stats.hero_damage, 5)                    # metadata fills the gap
+        self.assertEqual(len(merged.brawl_rounds), 1)                    # empty base list doesn't shadow it
+
+
+class MatchCardStats(unittest.TestCase):
+    def _card(self, **kw):
+        import cards
+        base = dict(name="Mectus", hero="Infernus", match_id=1, won=True, kills=10, deaths=2, assists=8,
+                    duration_s=1800, start_time=1794163216, net_worth=30000, last_hits=150, denies=8)
+        base.update(kw)
+        return cards.render_match_card(cards.MatchCardData(**base))
+
+    def test_renders_with_stats_and_mode(self):
+        png = self._card(mode="Ranked", mode_kind="ranked",
+                         stats=MatchStats(hero_damage=17883, shots_hit=1913, shots_missed=1321))
+        self.assertGreater(len(png.getvalue()), 0)
+
+    def test_renders_brawl_round_score(self):
+        png = self._card(mode="Street Brawl", mode_kind="brawl", brawl_score=(3, 1), brawl_round_avg_s=154,
+                         stats=MatchStats(hero_damage=1))
+        self.assertGreater(len(png.getvalue()), 0)
+
+    def test_renders_without_stats(self):
+        png = self._card()  # old payload: no stats, no mode
+        self.assertGreater(len(png.getvalue()), 0)
 
 
 if __name__ == "__main__":

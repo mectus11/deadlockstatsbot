@@ -7,6 +7,7 @@ Commands
   /setchannel [channel]    (admins) choose the channel for automatic match cards
   /stats [steamid]         overall stats card (defaults to your saved account)
   /latestmatch [steamid]   latest match card (defaults to your saved account)
+  /matches [steamid] [count]  compact list of recent matches: result, hero, mode, KDA (default 10)
 """
 import asyncio
 import logging
@@ -24,7 +25,7 @@ from db import DB
 from deadlock_api import ApiUnavailable, DeadlockAPI
 from images import ImageStore
 from local_icons import LocalIcons
-from models import Match, merge_match
+from models import Match, match_type, merge_match
 from statlocker import StatlockerAPI, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import STEAM_INPUT_HELP, parse_steam_input
@@ -38,6 +39,13 @@ MAX_AUTOPOST_PER_CYCLE = 3  # per player, so a long gap never floods the channel
 MAX_WAIT_FOR_ITEMS = 5      # poll cycles to wait for a match's item data before posting without it
 UNREACHABLE_MSG = ("I couldn't reach api.deadlock-api.com (network or DNS problem on the bot's computer). "
                    "Check the internet connection and try again in a minute.")
+_SHORT_MODE = {"ranked": "Ranked", "brawl": "Brawl", "bot": "Bot", "standard": "Standard"}
+
+
+def _short_mode(m: Match) -> str:
+    """Compact label for the /matches list (the latest-match card uses the full one)."""
+    kind, label = match_type(m)
+    return _SHORT_MODE.get(kind, label)
 
 
 class StatsBot(discord.Client):
@@ -123,6 +131,33 @@ class StatsBot(discord.Client):
             statlocker=profile is not None,
         ))
 
+    async def build_matches_card(self, account_id: int, history: list[Match] | None = None,
+                                 fallback_name: str | None = None, count: int = 10):
+        """Compact list of the last `count` matches — result, hero, mode, KDA. Unlike /latestmatch,
+        this only needs the match-history entries themselves (already has K/D/A/hero/duration),
+        so it's a single fast request with no per-match detail lookups."""
+        history = history if history is not None else await self.dl.match_history(account_id)
+        profile = await self.sl.profile(account_id) if self.sl.enabled else None
+        if not history and not profile:
+            return None
+        recent = history[:count]
+        hero_cat = await self.dl.heroes()
+        heroes = [hero_cat.get(m.hero_id) for m in recent]
+        pics = await self.images.get_many([h.image if h else None for h in heroes] +
+                                          ([profile.avatar_url] if profile else []))
+        return cards.render_matches_card(cards.MatchesCardData(
+            name=await self.display_name(account_id, profile, fallback_name),
+            account_id=account_id,
+            matches=[cards.MatchRow(
+                hero=h.name if h else f"Hero #{m.hero_id}", won=m.won, kills=m.kills, deaths=m.deaths,
+                assists=m.assists, match_id=m.match_id, start_time=m.start_time, duration_s=m.duration_s,
+                hero_icon=pics.get(h.image) if h else None,
+                mode=_short_mode(m), mode_kind=match_type(m)[0],
+            ) for m, h in zip(recent, heroes)],
+            avatar=pics.get(profile.avatar_url) if profile else None,
+            statlocker=profile is not None,
+        ))
+
     async def load_match(self, account_id: int, m: Match) -> Match:
         """History entry enriched with per-player stats and items from match metadata."""
         detail = await self.dl.match_detail(m.match_id, account_id)
@@ -151,12 +186,15 @@ class StatsBot(discord.Client):
         own = {a.id: self.local.get(a.name, a.tier) for a in known}  # your files in assets/items win
         pics = await self.images.get_many([hero.image if hero else None, profile.avatar_url if profile else None,
                                            *(a.image for a in known if not own[a.id])])
+        mode_kind, mode = match_type(m)
         return cards.render_match_card(cards.MatchCardData(
             name=await self.display_name(account_id, profile, fallback_name),
             hero=hero.name if hero else await self.dl.hero_name(m.hero_id),
             match_id=m.match_id, won=m.won, kills=m.kills, deaths=m.deaths, assists=m.assists,
             duration_s=m.duration_s, start_time=m.start_time, net_worth=m.net_worth,
             last_hits=m.last_hits, denies=m.denies,
+            mode=mode, mode_kind=mode_kind, stats=m.stats,
+            brawl_score=m.brawl_score, brawl_round_avg_s=m.brawl_avg_round_s if m.brawl_score else None,
             hero_icon=pics.get(hero.image) if hero else None,
             avatar=pics.get(profile.avatar_url) if profile else None,
             items=[cards.ItemView(a.name, own[a.id] or pics.get(a.image), a.slot, a.tier) for a in known],
@@ -328,6 +366,21 @@ async def stats(interaction: discord.Interaction, steamid: str | None = None):
         return await interaction.followup.send(
             "No data found for that account. The profile may be private, or the match history isn't available yet.")
     await interaction.followup.send(file=discord.File(png, filename="stats.png"))
+
+
+@bot.tree.command(name="matches", description="Compact list of your recent matches (result, hero, mode, KDA)")
+@app_commands.describe(steamid="Leave empty to use your linked account",
+                       count="How many matches to show (default 10, max 10)")
+async def matches(interaction: discord.Interaction, steamid: str | None = None, count: int = 10):
+    await interaction.response.defer()
+    acc, name = await resolve_account(interaction, steamid)
+    if acc is None:
+        return
+    png = await bot.build_matches_card(acc, fallback_name=name, count=max(1, min(count, 10)))
+    if png is None:
+        return await interaction.followup.send(
+            "No data found for that account. The profile may be private, or the match history isn't available yet.")
+    await interaction.followup.send(file=discord.File(png, filename="matches.png"))
 
 
 @bot.tree.command(name="latestmatch", description="Card for the latest match")

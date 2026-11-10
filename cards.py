@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from models import MatchStats
 from stats import Overall
 
 log = logging.getLogger("cards")
@@ -29,6 +30,9 @@ AMBER = (245, 190, 70)
 SOUL = (84, 212, 232)
 SLOT_COLORS = {"weapon": (240, 160, 60), "vitality": (110, 200, 110), "spirit": (176, 124, 236)}
 SLOT_ORDER = {"weapon": 0, "vitality": 1, "spirit": 2}
+MODE_COLORS = {"ranked": AMBER, "brawl": (240, 160, 60), "bot": (120, 170, 240),
+               "standard": MUTED, "other": MUTED}
+STATS_PANEL_H = 186
 ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V"}
 SOUL_FILE = Path(__file__).parent / "assets" / "souls.png"  # drop the real souls icon here to use it
 _soul_cache: list = []
@@ -207,6 +211,52 @@ def _footer(c: Canvas, y: int, statlocker: bool):
     c.text(c.w - 40, y, "Match data: deadlock-api.com", 12, MUTED, False, "ra")
 
 
+def _mmss(seconds: int | None) -> str:
+    if seconds is None:
+        return "-"
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _stats_panel(c: Canvas, x, y, w, h, s: MatchStats):
+    """Compact 5x2 grid of combat/farming stats plus a kill-breakdown line."""
+    c.rect(x, y, w, h, PANEL, outline=PANEL_LINE)
+    c.text(x + 24, y + 14, "MATCH STATS", 12, MUTED, True)
+
+    cols, pad, gap, tile_h = 5, 24, 10, 54
+    tw = (w - 2 * pad - (cols - 1) * gap) / cols
+    rows = [
+        [("Hero damage", _fmt(s.hero_damage, "{:,.0f}"), AMBER),
+         ("Damage taken", _fmt(s.damage_taken, "{:,.0f}"), RED),
+         ("Healing", _fmt(s.healing, "{:,.0f}"), GREEN),
+         ("Mitigated", _fmt(s.damage_mitigated, "{:,.0f}"), TEXT),
+         ("Accuracy", _fmt(s.accuracy, "{:.1f}", "%"), TEXT)],
+        [("Creep damage", _fmt(s.creep_damage, "{:,.0f}"), TEXT),
+         ("Boss damage", _fmt(s.boss_damage, "{:,.0f}"), TEXT),
+         ("Neutral damage", _fmt(s.neutral_damage, "{:,.0f}"), TEXT),
+         ("Crit rate", _fmt(s.crit_rate, "{:.1f}", "%"), TEXT),
+         ("Level", _fmt(s.level), TEXT)],
+    ]
+    for row, tiles in enumerate(rows):
+        for i, (label, value, color) in enumerate(tiles):
+            tx = x + pad + i * (tw + gap)
+            ty = y + 34 + row * (tile_h + 8)
+            c.rect(tx, ty, tw, tile_h, PANEL, outline=PANEL_LINE, r=10)
+            c.text(tx + tw / 2, ty + 13, label.upper(), 10, MUTED, True, "ma")
+            c.text(tx + tw / 2, ty + 38, value, 22, color, True, "mm")
+
+    parts = [f"{v} {name}" for name, v in (("bullet", s.bullet_kills), ("melee", s.melee_kills),
+                                           ("ability", s.ability_kills), ("headshot", s.headshot_kills))
+             if v is not None]
+    line = "Kills  " + " · ".join(parts) if parts else ""
+    if s.creep_kills is not None:
+        creeps = f"Creeps {s.creep_kills}" + (f"/{s.possible_creeps}" if s.possible_creeps is not None else "")
+        line += ("   |   " if line else "") + creeps
+    if s.neutral_kills is not None:
+        line += ("   |   " if line else "") + f"Neutrals {s.neutral_kills}"
+    if line:
+        c.text(x + 24, y + h - 26, line, 12, MUTED)
+
+
 # =============================================================================
 @dataclass
 class HeroRow:
@@ -314,6 +364,11 @@ class MatchCardData:
     avatar: bytes | None = None
     items: list[ItemView] = field(default_factory=list)
     unnamed_items: int = 0  # bought, but no catalogue entry to show
+    mode: str | None = None             # match-type pill, e.g. "Ranked" / "Street Brawl"
+    mode_kind: str | None = None        # ranked / brawl / bot / standard / other (pill colour)
+    stats: MatchStats | None = None     # end-of-match combat/farming stats
+    brawl_score: tuple[int, int] | None = None  # (own, enemy) rounds won, brawl only
+    brawl_round_avg_s: int | None = None
     own_lobby_rank: str | None = None
     enemy_lobby_rank: str | None = None
     rank_name: str | None = None        # player's own current rank (e.g. "Archon 3")
@@ -328,7 +383,8 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     rows = max(1, ceil(len(shown) / ITEMS_PER_ROW))
     items_h = 44 + rows * (ITEM_CELL_H + ITEM_GAP) + 8 if shown else 84
     has_lobby = bool(d.own_lobby_rank or d.enemy_lobby_rank)
-    y_items = 340
+    y_stats = 340
+    y_items = y_stats + (STATS_PANEL_H + 12 if d.stats else 0)
     y_end = y_items + items_h
     c = Canvas(1000, y_end + (44 if has_lobby else 20) + 30)
     color = GREEN if d.won is True else RED if d.won is False else AMBER
@@ -342,6 +398,8 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     info = f"Match #{d.match_id}"
     c.text(194, 122, info, 14, MUTED)
     x = 194 + c.text_w(info, 14) + 10
+    if d.mode:
+        x += c.pill(x, 115, d.mode, MODE_COLORS.get(d.mode_kind or "", MUTED)) + 10
     if d.rank_name:
         rank_txt = d.rank_name + (f"  · {d.pp_score} PP" if d.pp_score is not None else "")
         c.text(x, 122, rank_txt, 14, MUTED, True)
@@ -372,15 +430,26 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     if None not in (d.kills, d.deaths, d.assists):
         c.text(300, 298, f"KDA {(d.kills + d.assists) / max(d.deaths, 1):.2f}", 14, MUTED, True, "mm")
     c.d.line((580 * 2, 200 * 2, 580 * 2, 300 * 2), fill=PANEL_LINE, width=2)
-    spm = d.net_worth / (d.duration_s / 60) if d.net_worth and d.duration_s else None
-    for (label, value, soul), (x, y) in zip(
-            [("Net worth", _fmt(d.net_worth, "{:,.0f}"), True), ("Souls / min", _fmt(spm, "{:,.0f}"), True),
-             ("Last hits", _fmt(d.last_hits), False), ("Denies", _fmt(d.denies), False)],
-            [(612, 198), (790, 198), (612, 254), (790, 254)]):
+    if d.brawl_score is not None:
+        # Street Brawl has no soul economy: round results are the useful numbers there.
+        own, enemy = d.brawl_score
+        right_tiles = [("Rounds won", str(own), False), ("Rounds lost", str(enemy), False),
+                       ("Round score", f"{own} - {enemy}", False),
+                       ("Avg round", _mmss(d.brawl_round_avg_s), False)]
+    else:
+        spm = d.net_worth / (d.duration_s / 60) if d.net_worth and d.duration_s else None
+        right_tiles = [("Net worth", _fmt(d.net_worth, "{:,.0f}"), True),
+                       ("Souls / min", _fmt(spm, "{:,.0f}"), True),
+                       ("Last hits", _fmt(d.last_hits), False), ("Denies", _fmt(d.denies), False)]
+    for (label, value, soul), (x, y) in zip(right_tiles,
+                                            [(612, 198), (790, 198), (612, 254), (790, 254)]):
         c.text(x, y, label.upper(), 11, MUTED, True)
         if soul:
             c.soul(x + 11, y + 30, 22)
         c.text(x + (30 if soul else 0), y + 16, value, 28, TEXT, True)
+
+    if d.stats:
+        _stats_panel(c, 40, y_stats, 920, STATS_PANEL_H, d.stats)
 
     # items bought
     c.rect(40, y_items, 920, items_h, PANEL, outline=PANEL_LINE)
@@ -411,4 +480,84 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
                       f"   |   Enemy team: {d.enemy_lobby_rank or '-'}", 14, MUTED)
         y += 26
     _footer(c, y + 6, d.statlocker)
+    return c.png()
+
+
+# =============================================================================
+@dataclass
+class MatchRow:
+    hero: str
+    won: bool | None
+    kills: int | None
+    deaths: int | None
+    assists: int | None
+    match_id: int | None = None
+    start_time: int | None = None
+    duration_s: int | None = None
+    hero_icon: bytes | None = None
+    mode: str | None = None
+    mode_kind: str | None = None
+
+
+@dataclass
+class MatchesCardData:
+    name: str
+    account_id: int
+    matches: list[MatchRow] = field(default_factory=list)
+    avatar: bytes | None = None
+    statlocker: bool = False
+
+
+ROW_H = 60
+
+
+def render_matches_card(d: MatchesCardData) -> io.BytesIO:
+    rows = d.matches
+    body_h = max(1, len(rows)) * ROW_H + 16
+    c = Canvas(1000, 120 + body_h + 56)
+
+    # header
+    c.rect(40, 30, 920, 76, PANEL, outline=PANEL_LINE)
+    c.avatar(d.avatar, 56, 44, 48)
+    if d.avatar is None:
+        c.text(80, 68, (d.name[:1] or "?").upper(), 20, MUTED, True, "mm")
+    c.text(120, 50, c.fit(d.name, 24, True, 600), 24, TEXT, True)
+    c.text(120, 80, f"Last {len(rows)} matches  |  Account {d.account_id}", 14, MUTED)
+    wins = sum(1 for r in rows if r.won is True)
+    losses = sum(1 for r in rows if r.won is False)
+    c.text(940, 68, f"{wins}W  {losses}L", 16, TEXT, True, "rm")
+
+    # rows
+    y0 = 124
+    c.rect(40, y0, 920, body_h, PANEL, outline=PANEL_LINE)
+    if not rows:
+        c.text(500, y0 + body_h / 2, "No recent matches found.", 15, MUTED, False, "mm")
+    for i, r in enumerate(rows):
+        y = y0 + 8 + i * ROW_H
+        color = GREEN if r.won is True else RED if r.won is False else AMBER
+        c.rect(40, y, 6, ROW_H - 6, color, r=3)
+        c.icon(r.hero_icon, 58, y + 3, ROW_H - 12, ROW_H - 12, r=10, label=r.hero, focus=(0.5, 0.3))
+        cy = y + (ROW_H - 6) / 2
+        c.text(58 + ROW_H - 2, cy, "WIN" if r.won is True else "LOSS" if r.won is False else "—",
+               12, color, True, "lm")
+        c.text(58 + ROW_H - 2, cy + 18, c.fit(r.hero, 16, True, 220), 16, TEXT, True, "lm")
+        if r.mode:
+            c.pill(336, cy - 11, r.mode, MODE_COLORS.get(r.mode_kind or "", MUTED), size=11)
+        if None not in (r.kills, r.deaths, r.assists):
+            kda = f"{r.kills} / {r.deaths} / {r.assists}"
+            c.text(560, cy, kda, 16, TEXT, True, "lm")
+            ratio = (r.kills + r.assists) / max(r.deaths, 1)
+            c.text(560, cy + 18, f"KDA {ratio:.2f}", 12, MUTED, False, "lm")
+        if r.duration_s:
+            m, s = divmod(r.duration_s, 60)
+            c.text(760, cy, f"{m}:{s:02d}", 14, MUTED, False, "lm")
+        if r.start_time:
+            c.text(940, cy + 9, datetime.fromtimestamp(r.start_time, timezone.utc).strftime("%d %b, %H:%M"),
+                   13, MUTED, False, "rm")
+        if r.match_id:
+            c.text(940, cy - 9, f"#{r.match_id}", 12, MUTED, False, "rm")
+        if i < len(rows) - 1:
+            c.d.line((40 * c.s, (y + ROW_H) * c.s, 960 * c.s, (y + ROW_H) * c.s), fill=PANEL_LINE, width=1)
+
+    _footer(c, y0 + body_h + 24, d.statlocker)
     return c.png()

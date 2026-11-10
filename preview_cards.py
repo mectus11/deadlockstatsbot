@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 import cards
-from models import Match
+from models import Match, MatchStats
 from stats import compute_overall
 
 
@@ -48,15 +48,37 @@ save("stats_no_statlocker.png", cards.render_stats_card(cards.StatsCardData(
     heroes=[cards.HeroRow(h.name, h.games, h.winrate) for h in rows])))
 common = dict(name="ExamplePlayer", hero="Infernus", match_id=41525919, kills=11, deaths=4, assists=17,
               duration_s=2174, start_time=1757346341, net_worth=48210, last_hits=212, denies=14)
+sample_stats = MatchStats(
+    hero_damage=17883, damage_taken=2452, healing=323, damage_mitigated=968,
+    shots_hit=1913, shots_missed=1321, hero_bullets_hit=1759, hero_bullets_hit_crit=226,
+    creep_damage=8832, neutral_damage=937, boss_damage=3977, creep_kills=31, possible_creeps=38,
+    neutral_kills=2, bullet_kills=9, melee_kills=1, ability_kills=4, headshot_kills=1, level=24)
 save("match.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items, own_lobby_rank="Oracle 5",
-    enemy_lobby_rank="Oracle 3", rank_name="Oracle 4", pp_score=4250, pp_delta=86, statlocker=True, **common)))
+    enemy_lobby_rank="Oracle 3", rank_name="Oracle 4", pp_score=4250, pp_delta=86, statlocker=True,
+    mode="Ranked", mode_kind="ranked", stats=sample_stats, **common)))
+save("match_brawl.png", cards.render_match_card(cards.MatchCardData(
+    won=True, hero_icon=fake_icon(6), avatar=fake_icon(3), items=items[:8], mode="Street Brawl",
+    mode_kind="brawl", brawl_score=(3, 1), brawl_round_avg_s=154, stats=sample_stats, **common)))
+save("match_bot.png", cards.render_match_card(cards.MatchCardData(
+    won=False, hero_icon=fake_icon(4), items=items[:6], mode="Bot Match · Easy", mode_kind="bot",
+    stats=sample_stats, **common)))
 save("match_loss_few_items.png", cards.render_match_card(cards.MatchCardData(
     won=False, hero_icon=fake_icon(2), items=items[:5], unnamed_items=2,
-    rank_name="Archon 3", pp_score=3690, pp_delta=-54, statlocker=True, **common)))
+    rank_name="Archon 3", pp_score=3690, pp_delta=-54, statlocker=True,
+    mode="Standard", mode_kind="standard", stats=sample_stats, **common)))
 save("match_sparse.png", cards.render_match_card(cards.MatchCardData(
     name="Account 123456789", hero="Hero #99", match_id=1, won=None, kills=None, deaths=None, assists=None,
     duration_s=None, start_time=None, net_worth=None, last_hits=None, denies=None)))
 save("match_many_items.png", cards.render_match_card(cards.MatchCardData(
-    won=True, hero_icon=fake_icon(4), items=items * 2, **common)))
+    won=True, hero_icon=fake_icon(4), items=items * 2, mode="Ranked", mode_kind="ranked",
+    stats=sample_stats, **common)))
+save("matches.png", cards.render_matches_card(cards.MatchesCardData(
+    name="ExamplePlayer", account_id=123456789, avatar=fake_icon(3), statlocker=True,
+    matches=[cards.MatchRow("Infernus", True, 11, 4, 17, 41525919, 1757346341, 2174,
+                            fake_icon(1), "Ranked", "ranked"),
+             cards.MatchRow("Seven", False, 6, 9, 8, 41525918, 1757340000, 1800,
+                            fake_icon(2), "Brawl", "brawl"),
+             cards.MatchRow("Haze", True, 14, 0, 15, 41525917, 1757330000, 858,
+                            fake_icon(6), "Bot", "bot")])))
 print(sorted(p.name for p in out.iterdir()))

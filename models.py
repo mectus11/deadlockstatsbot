@@ -22,6 +22,51 @@ class ItemBuy:
 
 
 @dataclass
+class MatchStats:
+    """End-of-match totals from the metadata `stats` time series (last snapshot)."""
+    hero_damage: int | None = None        # player_damage (damage dealt to heroes)
+    damage_taken: int | None = None       # player_damage_taken
+    healing: int | None = None            # player_healing
+    damage_mitigated: int | None = None
+    shots_hit: int | None = None
+    shots_missed: int | None = None
+    hero_bullets_hit: int | None = None
+    hero_bullets_hit_crit: int | None = None
+    creep_damage: int | None = None
+    neutral_damage: int | None = None
+    boss_damage: int | None = None        # damage dealt to bosses/objectives
+    creep_kills: int | None = None
+    possible_creeps: int | None = None
+    neutral_kills: int | None = None
+    bullet_kills: int | None = None
+    melee_kills: int | None = None
+    ability_kills: int | None = None
+    headshot_kills: int | None = None
+    level: int | None = None
+
+    @property
+    def accuracy(self) -> float | None:
+        """Bullet accuracy in percent, or None when the API didn't report shots."""
+        if self.shots_hit is None or self.shots_missed is None:
+            return None
+        total = self.shots_hit + self.shots_missed
+        return self.shots_hit / total * 100 if total else None
+
+    @property
+    def crit_rate(self) -> float | None:
+        """Share of hero bullet hits that were headshots, in percent."""
+        if not self.hero_bullets_hit or self.hero_bullets_hit_crit is None:
+            return None
+        return self.hero_bullets_hit_crit / self.hero_bullets_hit * 100
+
+
+@dataclass
+class BrawlRound:
+    winning_team: int | None = None
+    duration_s: int | None = None
+
+
+@dataclass
 class Match:
     match_id: int
     hero_id: int | None = None
@@ -34,7 +79,28 @@ class Match:
     last_hits: int | None = None
     denies: int | None = None
     won: bool | None = None
+    game_mode: int | None = None   # 1 normal, 4 street brawl
+    match_mode: int | None = None  # 1 unranked, 3 coop bot, 4 ranked, ...
+    ranked_type: int | None = None
+    bot_difficulty: int | None = None
+    team: int | str | None = None
+    level: int | None = None
+    stats: MatchStats | None = None
+    brawl_rounds: list[BrawlRound] = field(default_factory=list)
     items: list[ItemBuy] = field(default_factory=list)  # final build, purchase order
+
+    @property
+    def brawl_score(self) -> tuple[int, int] | None:
+        """(own rounds won, enemy rounds won) for a Street Brawl, else None."""
+        if not self.brawl_rounds or self.team is None:
+            return None
+        own = sum(1 for r in self.brawl_rounds if str(r.winning_team) == str(self.team))
+        return own, len(self.brawl_rounds) - own
+
+    @property
+    def brawl_avg_round_s(self) -> int | None:
+        durations = [r.duration_s for r in self.brawl_rounds if r.duration_s]
+        return round(sum(durations) / len(durations)) if durations else None
 
 
 @dataclass
@@ -65,6 +131,36 @@ def _team(v):
     return i if i is not None else (str(v).lower() if v is not None else None)
 
 
+# --- match type ------------------------------------------------------------
+# Only 1 (normal) and 4 (street brawl) are confirmed by live payloads; the rest are
+# best-effort labels from the Source 2 enums. Unknown values fall back to "Unknown".
+GAME_MODE_NAMES = {1: "Standard", 4: "Street Brawl"}
+MATCH_MODE_NAMES = {1: "Standard", 2: "Private Lobby", 3: "Bot Match", 4: "Ranked",
+                    5: "Server Test", 6: "Tutorial", 7: "Hero Labs", 8: "New Player"}
+BOT_DIFFICULTY_NAMES = {1: "Easy", 2: "Medium", 3: "Hard", 4: "Nightmare", 5: "Guided"}
+
+
+def match_type(m: Match) -> tuple[str, str]:
+    """(kind, label) for the card pill. kind drives the colour: ranked/brawl/bot/standard/other."""
+    brawl = m.game_mode == 4
+    if m.match_mode == 4:
+        return "ranked", "Ranked"
+    if m.match_mode == 3:  # coop bot, which can also be played on the brawl map
+        difficulty = BOT_DIFFICULTY_NAMES.get(m.bot_difficulty)
+        if brawl:
+            return "brawl", "Street Brawl · " + (f"{difficulty} Bots" if difficulty else "Bots")
+        return "bot", "Bot Match" + (f" · {difficulty}" if difficulty else "")
+    if brawl:
+        return "brawl", "Street Brawl"
+    if m.match_mode == 1:
+        return "standard", "Standard"
+    if m.match_mode in MATCH_MODE_NAMES:
+        return "other", MATCH_MODE_NAMES[m.match_mode]
+    if m.game_mode in GAME_MODE_NAMES:
+        return "other", GAME_MODE_NAMES[m.game_mode]
+    return "other", "Unknown"
+
+
 # --- match history entries ------------------------------------------------
 def normalize_entry(e: dict) -> Match | None:
     match_id = _int(_pick(e, "match_id", "matchId"))
@@ -88,6 +184,9 @@ def normalize_entry(e: dict) -> Match | None:
         last_hits=_int(_pick(e, "last_hits")),
         denies=_int(_pick(e, "denies")),
         won=bool(won) if won is not None else None,
+        game_mode=_int(_pick(e, "game_mode", "gameMode")),
+        match_mode=_int(_pick(e, "match_mode", "matchMode")),
+        team=_team(_pick(e, "player_team", "team")),
     )
 
 
@@ -96,6 +195,49 @@ def final_items(buys: list[ItemBuy]) -> list[ItemBuy]:
     """Items still owned at the end (sold ones, and components merged into an
     upgrade, carry a sold time), in purchase order."""
     return sorted((b for b in buys if not b.sold_s), key=lambda b: b.bought_s or 0)
+
+
+def _last_stats(me: dict) -> MatchStats | None:
+    """End-of-match totals: the stats array is a ~180s time series, so take the
+    snapshot with the highest timestamp (not blindly the last element)."""
+    snapshots = [s for s in (me.get("stats") or []) if isinstance(s, dict)]
+    if not snapshots:
+        return None
+    s = max(snapshots, key=lambda x: _int(x.get("time_stamp_s")) or 0)
+
+    def g(*names):
+        return _int(_pick(s, *names))
+
+    return MatchStats(
+        hero_damage=g("player_damage"),
+        damage_taken=g("player_damage_taken"),
+        healing=g("player_healing"),
+        damage_mitigated=g("damage_mitigated"),
+        shots_hit=g("shots_hit"),
+        shots_missed=g("shots_missed"),
+        hero_bullets_hit=g("hero_bullets_hit"),
+        hero_bullets_hit_crit=g("hero_bullets_hit_crit"),
+        creep_damage=g("creep_damage"),
+        neutral_damage=g("neutral_damage"),
+        boss_damage=g("boss_damage"),
+        creep_kills=g("creep_kills"),
+        possible_creeps=g("possible_creeps"),
+        neutral_kills=g("neutral_kills"),
+        bullet_kills=g("bullet_kills"),
+        melee_kills=g("melee_kills"),
+        ability_kills=g("ability_kills"),
+        headshot_kills=g("headshot_kills"),
+        level=g("level"),
+    )
+
+
+def _brawl_rounds(info: dict) -> list[BrawlRound]:
+    out = []
+    for r in info.get("street_brawl_rounds") or []:
+        if isinstance(r, dict):
+            out.append(BrawlRound(_int(_pick(r, "winning_team")),
+                                  _int(_pick(r, "round_duration_s", "duration_s"))))
+    return out
 
 
 def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Match | None:
@@ -107,6 +249,7 @@ def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Ma
     if me is None:
         return None
     winner, team = _team(_pick(info, "winning_team")), _team(_pick(me, "team", "player_team"))
+    stats = _last_stats(me)
     buys = []
     for it in me.get("items") or []:
         iid = _int(_pick(it, "item_id", "upgrade_id", "id")) if isinstance(it, dict) else None
@@ -125,14 +268,27 @@ def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Ma
         last_hits=_int(_pick(me, "last_hits")),
         denies=_int(_pick(me, "denies")),
         won=None if winner is None or team is None else winner == team,
+        game_mode=_int(_pick(info, "game_mode", "gameMode")),
+        match_mode=_int(_pick(info, "match_mode", "matchMode")),
+        ranked_type=_int(_pick(info, "ranked_type")),
+        bot_difficulty=_int(_pick(info, "bot_difficulty")),
+        team=team,
+        level=_int(_pick(me, "level")) or (stats.level if stats else None),
+        stats=stats,
+        brawl_rounds=_brawl_rounds(info),
         items=final_items(buys),
     )
 
 
 def merge_match(base: Match, detail: Match) -> Match:
     """History entry first, metadata fills the gaps; items come from metadata."""
-    vals = {f.name: getattr(base, f.name) if getattr(base, f.name) is not None else getattr(detail, f.name)
-            for f in fields(Match) if f.name != "items"}
+    vals = {}
+    for f in fields(Match):
+        if f.name == "items":
+            continue
+        b, d = getattr(base, f.name), getattr(detail, f.name)
+        # an empty list is "missing" for brawl rounds, otherwise it would shadow the metadata
+        vals[f.name] = (b or d) if f.name == "brawl_rounds" else (b if b is not None else d)
     return Match(**vals, items=detail.items or base.items)
 
 

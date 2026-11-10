@@ -9,7 +9,8 @@ Posts a stats card after every Deadlock match you play, plus on-demand cards.
 | `/unlink` | Forgets your saved account and stops automatic posts for you. |
 | `/setchannel [channel]` | (Admins) Channel for automatic cards. Defaults to the current one. |
 | `/stats [steamid]` | Overall card: matches, win rate, KDA, souls/min, top heroes with portraits, rank. |
-| `/latestmatch [steamid]` | Match card: hero portrait, result, K/D/A, souls, and every item bought with its icon. |
+| `/matches [steamid] [count]` | Compact list of recent matches: result, hero, mode, KDA (default 10). |
+| `/latestmatch [steamid]` | Match card: hero portrait, result, match type (ranked/standard/bot/Street Brawl), K/D/A, combat stats, souls, and every item bought with its icon. |
 
 `steamid` can be a SteamID64 (17 digits), a 32-bit account ID, or a `steamcommunity.com/profiles/...` link
 (custom `/id/name` links can't be resolved). Leave it empty to use your saved account. `name` is optional and

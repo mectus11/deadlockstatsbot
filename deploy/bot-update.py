@@ -328,6 +328,11 @@ def wait_healthy(name: str, expected_sha: str | None, expected_image: str | None
     if not state.get("Running"):
         raise Fail(f"{name} exited right after starting (exit {state.get('ExitCode')})")
 
+    # only meaningful for a freshly created container: a restored one keeps its old restart count
+    if expected_sha and state.get("RestartCount"):
+        raise Fail(f"{name} restarted {state['RestartCount']} time(s) right after starting "
+                   f"(last exit {state.get('ExitCode')})")
+
     info = inspect(name)
     if expected_image and info.get("Image") != expected_image:
         raise Fail(f"{name} is running image {info.get('Image')}, expected {expected_image}")

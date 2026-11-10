@@ -5,7 +5,7 @@ Two ways to run this, depending on what you have:
 - **A VPS with SSH access** — follow the steps below; updates are `git pull` + `docker compose up -d --build`.
 - **The OVH "Custom Docker image" game panel** (no shell, just the web UI) — see
   [Updating the OVH panel deployment](#updating-the-ovh-panel-deployment) at the bottom instead; the build
-  steps below don't apply there.
+  steps below don't apply there. Updates there are one command: `sudo bot-update`.
 
 ## Deploying to an OVH Ubuntu VPS with Docker
 
@@ -89,23 +89,70 @@ Look for the Discord login confirmation (`^C` to stop watching, it keeps running
 
 ## Updating the OVH panel deployment
 
-GitHub Actions already rebuilds and publishes the image to `ghcr.io/<you>/deadlockstatsbot:latest`
-automatically on every push to `main` (`.github/workflows/docker-publish.yml`). What a plain web panel
-usually does **not** do on its own is notice that a new image was published and re-pull it — a "Restart"
-button in most such panels restarts the *existing* container image, it doesn't fetch a new one. So the loop
-is:
+GitHub Actions rebuilds and publishes `ghcr.io/mectus11/deadlockstatsbot:latest` on every push to `main`
+(`.github/workflows/docker-publish.yml`). Updating the VPS is then one command, `bot-update`, which lives
+in this repo at `deploy/bot-update.py`.
 
-1. Push your code change to GitHub.
-2. Check the **Actions** tab on your repo — wait for the green checkmark (a minute or two).
-3. In the OVH panel, look for whatever action re-pulls the image rather than just restarting the running
-   one — often called **Reinstall**, **Redeploy**, or similar (as opposed to plain **Restart**/**Stop+Start**).
-   Your `/app/data` volume keeps your saved accounts and channel either way, so this is safe to use.
-4. **Confirm it actually updated** by checking the logs for the new startup line:
-   `starting — build <commit sha>`. Compare that short SHA to the latest commit on GitHub (Actions tab, or
-   the repo's commit history) — if they match, the panel picked up the new image; if the log still shows an
-   old or `dev` SHA, that button didn't actually re-pull, and you'll need to look for the right one in the
-   panel (or ask its support/docs) or delete-and-reinstall the server.
+### Why a script at all
 
-There's no way to make this fully automatic without shell access to the host (that needs a sidecar like
-Watchtower watching Docker directly, which a web-panel-only setup doesn't expose) — but steps 1–4 are a
-five-minute loop, not a redeploy from scratch.
+The panel remembers the **id** of the container it created and only ever starts or restarts *that*
+container. Recreating the bot — which is what a new image needs — produces a new container with a new
+id, so the panel ends up pointing at a dead one and its Start/Restart buttons stop working. `bot-update`
+does the recreate and re-points the panel's database in the right order, so the panel keeps working.
+
+### Install (once, on the VPS)
+
+From a clone of this repo:
+
+```bash
+sudo install -m 755 deploy/bot-update.py /usr/local/bin/bot-update
+```
+
+It runs as root (it needs Docker and the panel's SQLite database), writes to `/var/log/bot-update.log`,
+and takes a lock so two runs can't overlap.
+
+### Update
+
+```bash
+sudo bot-update --dry-run     # show what would change, touch nothing
+sudo bot-update               # update now
+sudo bot-update --wait 600    # poll the registry for up to 10 min, then update
+sudo bot-update --rollback    # go back to the previous container
+```
+
+The normal loop is: push from your PC → wait for the green check in the Actions tab →
+`sudo bot-update --wait 600`. `--wait` polls every 15 s and returns as soon as the new build is
+published, so you can start it straight after pushing. If the build is already current it prints
+`already up to date` and changes nothing.
+
+### What it does, in order
+
+1. Finds the bot container by its image (not by a hardcoded name), and refuses to guess if several match.
+2. Pulls the image and compares its `BUILD_SHA` with the running container's — no-op if unchanged.
+3. Backs up the panel database via SQLite's own backup API.
+4. Recreates the container from its **own** `docker inspect` output: name, hostname, restart policy,
+   network and alias, labels, memory/CPU limits, binds, command and env. Nothing is hardcoded, so panel
+   changes can't drift away. Env keys that describe the image itself (`BUILD_SHA`, `PATH`, `LANG`,
+   `PYTHON_VERSION`, ...) are always taken from the new image, so the container can't keep reporting the
+   old commit. The panel backend is stopped for the swap, so it can't restart the old container mid-way
+   and leave two bots connected to Discord.
+5. Verifies the new container: running, image id matches, `RestartCount` unchanged, and
+   `starting — build <new sha>` present in the logs.
+6. Only then swaps the old container id for the new one in the panel database and restarts the backend,
+   checking that no stale reference remains.
+7. Keeps the old container as `<name>-prev` for rollback and removes any older one.
+
+If any step fails, the new container is removed, `-prev` is renamed back and started, the panel database
+is left untouched (or the container swap is undone if the database step failed), and the panel backend is
+started again — the bot stays up on the old build.
+
+### What it deliberately doesn't touch
+
+- The Valheim server, Traefik, and the panel frontend. Only the bot container and the panel's stored
+  container id change.
+- The bot's data: `/opt/gamepanel/servers/3/data:/data` (that's where `bot.db` lives).
+- The Discord token — that stays in the panel's environment for the server and is carried over verbatim.
+
+Useful flags: `--container <name>` if auto-detection is ambiguous, `--no-panel` to skip the database
+step, `--timeout <seconds>` for how long to wait for health. The panel database defaults to
+`/opt/gamepanel/data/game-panel.db` and the backend to `gamepanel-backend-1`.

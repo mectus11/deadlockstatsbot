@@ -64,9 +64,17 @@ not bought from the shop) are left out of the grid on purpose. Icons are shown w
 
 ## Development
 
-`python -m unittest test_core -v` runs the parsing/stats/database tests. `python preview_cards.py` renders sample
+`python -m unittest test_core test_deploy -v` runs the parsing/stats/database tests and the deploy script's
+tests. `python preview_cards.py` renders sample
 cards with generated stand-in icons into `./preview/`. A custom font: put `bold.ttf` and `regular.ttf` in `assets/fonts/`.
 
 Files: `bot.py` commands + poller · `cards.py` image cards · `deadlock_api.py` / `statlocker.py` API clients ·
 `models.py` parsing · `images.py` download cache · `stats.py` aggregates · `steam.py` ID parsing · `db.py` storage ·
 `probe.py` live-data check.
+
+## Deploying
+
+The bot runs as a Docker container on an OVH game panel. Pushing to `main` publishes a new image via GitHub
+Actions; applying it on the VPS is `sudo bot-update` (from `deploy/bot-update.py`), which pulls, recreates the
+container safely and re-points the panel at it, rolling back if the new build doesn't come up. Full details,
+including the one-time install, are in [DEPLOY.md](DEPLOY.md#updating-the-ovh-panel-deployment).

@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).parent / "deploy" / "bot-update.py"
 _spec = importlib.util.spec_from_file_location("bot_update", SCRIPT)
@@ -143,6 +144,74 @@ class Helpers(unittest.TestCase):
     def test_parse_env(self):
         self.assertEqual(bot_update.parse_env(["A=1", "B=x=y", "C="]), {"A": "1", "B": "x=y", "C": ""})
         self.assertEqual(bot_update.parse_env(None), {})
+
+
+class FindBot(unittest.TestCase):
+    """A pull moves the :latest tag, which makes `docker ps` show a bare image id for the old
+    container. Detection has to survive that, or every second update fails."""
+
+    def find(self, names, infos, images, override=None):
+        with mock.patch.object(bot_update, "docker", return_value="\n".join(names)), \
+             mock.patch.object(bot_update, "inspect", side_effect=lambda n: infos[n]), \
+             mock.patch.object(bot_update, "docker_json", side_effect=lambda *a: [images[a[-1]]]):
+            return bot_update.find_bot_container(IMAGE, override)
+
+    def test_finds_container_whose_image_now_displays_an_id(self):
+        # exactly what the VPS did: tag moved, container shows "a493537c9976"
+        infos = {
+            "discordbot_deadlockstats-3": {"Config": {"Image": IMAGE}, "Image": "sha256:old"},
+            "si-cherni-1": {"Config": {"Image": "ovhcom/gamepanel-valheim:1.6.0"},
+                            "Image": "sha256:valheim"},
+        }
+        images = {
+            "sha256:old": {"RepoTags": [], "RepoDigests": []},
+            "sha256:valheim": {"RepoTags": ["ovhcom/gamepanel-valheim:1.6.0"]},
+        }
+        self.assertEqual(
+            self.find(list(infos), infos, images), "discordbot_deadlockstats-3")
+
+    def test_matches_by_tag_when_the_container_was_created_from_an_id(self):
+        infos = {"bot": {"Config": {"Image": "a493537c9976"}, "Image": "sha256:new"}}
+        images = {"sha256:new": {"RepoTags": [IMAGE]}}
+        self.assertEqual(self.find(["bot"], infos, images), "bot")
+
+    def test_matches_by_digest(self):
+        infos = {"bot": {"Config": {"Image": "a493537c9976"}, "Image": "sha256:new"}}
+        images = {"sha256:new": {"RepoDigests": ["ghcr.io/mectus11/deadlockstatsbot@sha256:abc"]}}
+        self.assertEqual(self.find(["bot"], infos, images), "bot")
+
+    def test_falls_back_to_build_sha_when_the_old_image_lost_its_refs(self):
+        # a pull can untag the old image completely, leaving the container with no repo reference
+        infos = {"bot": {"Config": {"Image": "a493537c9976"}, "Image": "sha256:old"}}
+        images = {"sha256:old": {"RepoTags": [], "RepoDigests": [],
+                                 "Config": {"Env": ["BUILD_SHA=de92a06"]}}}
+        self.assertEqual(self.find(["bot"], infos, images), "bot")
+
+    def test_ignores_prev_and_failed_containers(self):
+        infos = {
+            "bot": {"Config": {"Image": IMAGE}, "Image": "sha256:new"},
+            "bot-prev": {"Config": {"Image": IMAGE}, "Image": "sha256:old"},
+            "bot-failed": {"Config": {"Image": IMAGE}, "Image": "sha256:old"},
+        }
+        images = {"sha256:new": {}, "sha256:old": {}}
+        self.assertEqual(self.find(list(infos), infos, images), "bot")
+
+    def test_ambiguous_containers_are_reported(self):
+        infos = {
+            "bot-a": {"Config": {"Image": IMAGE}, "Image": "sha256:new"},
+            "bot-b": {"Config": {"Image": IMAGE}, "Image": "sha256:new"},
+        }
+        with self.assertRaises(bot_update.Fail) as ctx:
+            self.find(list(infos), infos, {"sha256:new": {}})
+        self.assertIn("bot-a", str(ctx.exception))
+        self.assertIn("bot-b", str(ctx.exception))
+
+    def test_no_match_mentions_the_container_flag(self):
+        infos = {"si-cherni-1": {"Config": {"Image": "ovhcom/gamepanel-valheim:1.6.0"},
+                                 "Image": "sha256:valheim"}}
+        with self.assertRaises(bot_update.Fail) as ctx:
+            self.find(list(infos), infos, {"sha256:valheim": {}})
+        self.assertIn("--container", str(ctx.exception))
 
 
 class PanelDatabase(unittest.TestCase):

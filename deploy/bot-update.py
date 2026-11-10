@@ -128,6 +128,35 @@ def build_sha(image_ref: str) -> str | None:
 
 
 # --- finding the bot -------------------------------------------------------
+def image_config(image_id: str) -> dict:
+    if not image_id:
+        return {}
+    try:
+        return docker_json("image", "inspect", image_id)[0]
+    except Fail:
+        return {}
+
+
+def is_bot_container(name: str, repo: str) -> bool:
+    """Does this container run an image from `repo`?
+
+    `docker ps` only shows one image name per container, and a pull moves the `:latest` tag to
+    the newer build, leaving the old image untagged — the container then displays a bare image id
+    (e.g. `a493537c9976`). The container's creation reference and the image's own tags/digests
+    still name the repo, so those are checked first. If the pull untagged the old image so
+    thoroughly that no reference is left, the image's own BUILD_SHA (set by the Dockerfile)
+    identifies it.
+    """
+    info = inspect(name)
+    config = image_config(info.get("Image") or "")
+    refs = [(info.get("Config") or {}).get("Image") or ""]
+    refs += list(config.get("RepoTags") or [])
+    refs += list(config.get("RepoDigests") or [])
+    if any(repo_of(ref) == repo for ref in refs if ref):
+        return True
+    return "BUILD_SHA" in parse_env((config.get("Config") or {}).get("Env"))
+
+
 def find_bot_container(image_ref: str, override: str | None) -> str:
     if override:
         if not exists(override):
@@ -136,12 +165,15 @@ def find_bot_container(image_ref: str, override: str | None) -> str:
 
     repo = repo_of(image_ref)
     rows = []
-    for line in docker("ps", "-a", "--format", "{{.Names}}\t{{.Image}}").splitlines():
-        if not line.strip():
+    for name in docker("ps", "-a", "--format", "{{.Names}}").splitlines():
+        name = name.strip()
+        if not name or name.endswith((PREV_SUFFIX, FAILED_SUFFIX)):
             continue
-        name, _, image = line.partition("\t")
-        if repo_of(image) == repo and not name.endswith((PREV_SUFFIX, FAILED_SUFFIX)):
-            rows.append(name)
+        try:
+            if is_bot_container(name, repo):
+                rows.append(name)
+        except Fail:
+            continue  # removed between the listing and the inspect
 
     if not rows:
         raise Fail(f"no container is using {repo}; pass --container <name>")

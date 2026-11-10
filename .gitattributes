@@ -1,0 +1,7 @@
+# The deploy script is installed as an executable on Linux, so its shebang must not end up with
+# a CRLF line ending when the repo is checked out on Windows.
+*.py text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

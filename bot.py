@@ -295,9 +295,10 @@ class StatsBot(discord.Client):
 
     @tasks.loop(seconds=600)
     async def poll_patches(self):
-        states = self.db.all_patch_channels()
-        if not states:  # nobody has run /setchannel yet: don't touch the feed
+        channels = dict(self.db.all_channels())  # guild id -> channel id
+        if not channels:  # nobody has run /setchannel yet: don't touch the feed
             return
+        states = {state.guild_id: state for state in self.db.all_patch_channels()}
         try:
             notes = await self.fetch_patch_notes()
         except Exception:
@@ -306,32 +307,37 @@ class StatsBot(discord.Client):
         if not notes:
             log.warning("patch poll: the Steam feed contained no patch notes")
             return
-        for state in states:
+        for guild_id, channel_id in channels.items():
             try:
-                channel_id = self.db.get_channel(state.guild_id)
-                if channel_id is None:
+                state = states.get(guild_id)
+                if state is None:
+                    # The channel was configured before patch notes existed. Record the
+                    # newest note without posting, so upgrading never backfills the channel.
+                    self.db.set_patch_baseline(guild_id, notes[0].guid, notes[0].pub_ts)
+                    log.info("patch poll: baseline for guild %s set to %s (nothing posted)",
+                             guild_id, notes[0].guid)
                     continue
                 channel = self.get_channel(channel_id)
                 if channel is None:
                     log.warning("patch poll: channel %s not found/visible for guild %s",
-                                channel_id, state.guild_id)
+                                channel_id, guild_id)
                     continue
                 new, baseline = find_new_notes(notes, state.last_guid)
                 if not new:
                     if baseline and baseline != state.last_guid:
-                        # first run for this guild, or the old guid fell off the 10-item feed:
-                        # record the newest note without posting so nobody gets flooded
-                        self.db.set_patch_baseline(state.guild_id, baseline, notes[0].pub_ts)
+                        # the old guid fell off the 10-item feed: record the newest note
+                        # without posting so a long outage never floods the channel
+                        self.db.set_patch_baseline(guild_id, baseline, notes[0].pub_ts)
                         log.info("patch poll: baseline for guild %s set to %s (nothing posted)",
-                                 state.guild_id, baseline)
+                                 guild_id, baseline)
                     continue
                 for note in new:
                     await self.send_patch_note(channel, note)
-                    self.db.set_patch_baseline(state.guild_id, note.guid, note.pub_ts)
-                    log.info("patch poll: posted %r to guild %s", note.title, state.guild_id)
+                    self.db.set_patch_baseline(guild_id, note.guid, note.pub_ts)
+                    log.info("patch poll: posted %r to guild %s", note.title, guild_id)
                     await asyncio.sleep(1)
             except Exception:
-                log.exception("patch poll failed for guild %s", state.guild_id)
+                log.exception("patch poll failed for guild %s", guild_id)
 
     @poll_patches.before_loop
     async def _wait_ready_patches(self):

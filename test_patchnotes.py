@@ -177,6 +177,9 @@ class PatchStorage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = DB(os.path.join(tmp, "t.db"))
             self.assertIsNone(db.get_patch_channel(1))
+            db.set_channel(1, 10)
+            db.set_channel(2, 20)
+            self.assertEqual(sorted(db.all_channels()), [(1, 10), (2, 20)])
             db.set_patch_baseline(1, "g1", 100)
             self.assertEqual(db.get_patch_channel(1).last_guid, "g1")
             db.set_patch_baseline(1, "g2", 200)  # upsert

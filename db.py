@@ -143,6 +143,10 @@ class DB:
         ).fetchone()
         return r["channel_id"] if r else None
 
+    def all_channels(self) -> list[tuple[int, int]]:
+        return [(r["guild_id"], r["channel_id"]) for r in
+                self.conn.execute("SELECT guild_id, channel_id FROM channels")]
+
     # --- patch notes -----------------------------------------------------
     def get_patch_channel(self, guild_id: int) -> PatchChannel | None:
         r = self.conn.execute(

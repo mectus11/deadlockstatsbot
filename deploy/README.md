@@ -12,7 +12,7 @@ Then, on the VPS:
 sudo bot-update --dry-run     # show the plan, change nothing
 sudo bot-update               # pull, recreate, re-point the panel
 sudo bot-update --wait 600    # wait for a freshly pushed build, then update
-sudo bot-update --rollback    # swap back to the previous container
+sudo bot-update --rollback    # recreate the bot from the previous build
 ```
 
 Why it exists: the panel stores the **id** of the container it created and only starts/restarts that id,

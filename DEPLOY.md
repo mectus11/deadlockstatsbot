@@ -117,7 +117,7 @@ and takes a lock so two runs can't overlap.
 sudo bot-update --dry-run     # show what would change, touch nothing
 sudo bot-update               # update now
 sudo bot-update --wait 600    # poll the registry for up to 10 min, then update
-sudo bot-update --rollback    # go back to the previous container
+sudo bot-update --rollback    # recreate the bot from the previous build
 ```
 
 The normal loop is: push from your PC → wait for the green check in the Actions tab →
@@ -140,11 +140,14 @@ published, so you can start it straight after pushing. If the build is already c
    `starting — build <new sha>` present in the logs.
 6. Only then swaps the old container id for the new one in the panel database and restarts the backend,
    checking that no stale reference remains.
-7. Keeps the old container as `<name>-prev` for rollback and removes any older one.
+7. Tags the outgoing image as `<repo>:rollback` and removes the old container, so `--rollback` can
+   recreate it. The panel resolves a server's state from its `gamepanel.serverId` label, so keeping a
+   second labelled container around (the old `<name>-prev`) made it report the server as stopped while
+   the bot was actually running. Leftovers from that older scheme are deleted automatically.
 
-If any step fails, the new container is removed, `-prev` is renamed back and started, the panel database
-is left untouched (or the container swap is undone if the database step failed), and the panel backend is
-started again — the bot stays up on the old build.
+If any step fails, the new container is removed and the previous build is recreated from
+`<repo>:rollback` and started; the panel database is left untouched (or the container swap is undone if
+the database step failed), and the panel backend is started again — the bot stays up on the old build.
 
 ### What it deliberately doesn't touch
 

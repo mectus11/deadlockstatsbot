@@ -25,6 +25,7 @@ IMAGE = "ghcr.io/mectus11/deadlockstatsbot:latest"
 INSPECT = {
     "Id": OLD_ID,
     "Name": "/discordbot_deadlockstats-3",
+    "Image": "sha256:oldimage",
     "Config": {
         "Hostname": "discordbot_deadlockstats-3",
         "Env": [
@@ -144,6 +145,59 @@ class Helpers(unittest.TestCase):
     def test_parse_env(self):
         self.assertEqual(bot_update.parse_env(["A=1", "B=x=y", "C="]), {"A": "1", "B": "x=y", "C": ""})
         self.assertEqual(bot_update.parse_env(None), {})
+
+    def test_rollback_ref(self):
+        self.assertEqual(bot_update.rollback_ref("ghcr.io/a/b:latest"), "ghcr.io/a/b:rollback")
+        self.assertEqual(bot_update.rollback_ref("localhost:5000/a/b@sha256:abc"),
+                         "localhost:5000/a/b:rollback")
+
+
+class UpdateFlow(unittest.TestCase):
+    """The update must not leave a second container carrying the panel's serverId label.
+
+    The panel resolves a server's state from that label, so a leftover exited container (the old
+    `<name>-prev`) made it report the server as stopped while the bot was running.
+    """
+
+    def run_update(self):
+        calls = []
+        inspected = iter([INSPECT, {"Id": NEW_ID}])
+        patched = mock.Mock()
+        args = mock.Mock(image=IMAGE, container=None, dry_run=False, wait=0, timeout=45,
+                        panel_db="/nonexistent/game-panel.db",
+                        panel_backend="gamepanel-backend-1")
+        with mock.patch.object(bot_update, "find_bot_container", return_value="discordbot_deadlockstats-3"), \
+             mock.patch.object(bot_update, "inspect", side_effect=lambda n: next(inspected)), \
+             mock.patch.object(bot_update, "docker", side_effect=lambda *a, check=True: calls.append(a) or ""), \
+             mock.patch.object(bot_update, "build_sha", return_value="newsha"), \
+             mock.patch.object(bot_update, "image_id", return_value="sha256:newimage"), \
+             mock.patch.object(bot_update, "image_env", return_value={}), \
+             mock.patch.object(bot_update, "wait_healthy"), \
+             mock.patch.object(bot_update, "_remove_legacy"), \
+             mock.patch.object(bot_update, "_panel_backend", return_value="gamepanel-backend-1"), \
+             mock.patch.object(bot_update, "_stop_backend"), \
+             mock.patch.object(bot_update, "_start_backend"), \
+             mock.patch.object(bot_update, "_patch_panel", patched):
+            bot_update.do_update(args)
+        return calls, patched
+
+    def test_old_image_is_tagged_and_the_container_is_removed(self):
+        calls, _ = self.run_update()
+        self.assertIn(("tag", "sha256:oldimage", "ghcr.io/mectus11/deadlockstatsbot:rollback"), calls)
+        self.assertIn(("rm", "discordbot_deadlockstats-3"), calls)
+        self.assertNotIn("rename", [call[0] for call in calls])
+
+    def test_panel_is_repointed_at_the_new_id(self):
+        _, patched = self.run_update()
+        self.assertEqual(patched.call_args[0][1:], (OLD_ID, NEW_ID))
+
+
+class LegacyContainers(unittest.TestCase):
+    def test_leftovers_from_the_old_scheme_are_removed(self):
+        with mock.patch.object(bot_update, "exists", side_effect=lambda n: n == "bot-prev"), \
+             mock.patch.object(bot_update, "docker") as docker:
+            bot_update._remove_legacy("bot")
+        docker.assert_called_once_with("rm", "-f", "bot-prev")
 
 
 class FindBot(unittest.TestCase):

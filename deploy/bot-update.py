@@ -10,16 +10,20 @@ is what makes a plain `docker run` such a minefield. This script does the whole 
      settings cannot drift)
   3. verify the new build actually started
   4. re-point the panel's database at the new container id
-  5. keep the previous container around so --rollback is instant
+  5. tag the outgoing image `<repo>:rollback` so --rollback stays instant
+
+The old container is removed instead of being kept: the panel resolves a server's state from the
+`gamepanel.serverId` label, so a second container carrying that label (e.g. `<name>-prev`) makes
+its status sync report the server as stopped while the bot is in fact running.
 
 Usage (on the VPS, as root):
 
     sudo bot-update --dry-run     # show what would happen, change nothing
     sudo bot-update               # update now
     sudo bot-update --wait 600    # poll until a new build lands, then update
-    sudo bot-update --rollback    # go back to the previous container
+    sudo bot-update --rollback    # go back to the previous build
 
-Exit codes: 0 success or already up to date, 1 failure (the old container is left running).
+Exit codes: 0 success or already up to date, 1 failure (the previous build is restored).
 """
 
 from __future__ import annotations
@@ -43,8 +47,12 @@ DEFAULT_PANEL_DB = "/opt/gamepanel/data/game-panel.db"
 DEFAULT_PANEL_BACKEND = "gamepanel-backend-1"
 LOCK_PATH = "/var/lock/bot-update.lock"
 LOG_PATH = "/var/log/bot-update.log"
+# Older versions kept the outgoing container as `<name>-prev` (and `<name>-failed` after a failed
+# rollback). Those names are only used now to clean up leftovers.
 PREV_SUFFIX = "-prev"
 FAILED_SUFFIX = "-failed"
+# Image tag holding the build we last moved away from, so --rollback can recreate it.
+ROLLBACK_TAG = "rollback"
 SECRET_HINTS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
 # Environment that describes the image itself. The new image must win for these, otherwise the
 # recreated container keeps reporting the old commit (BUILD_SHA) or an outdated interpreter PATH.
@@ -92,6 +100,10 @@ def exists(name: str) -> bool:
     return _run(["docker", "inspect", name], check=False).returncode == 0
 
 
+def exists_image(ref: str) -> bool:
+    return _run(["docker", "image", "inspect", ref], check=False).returncode == 0
+
+
 def inspect(name: str) -> dict:
     data = docker_json("inspect", name)
     if not data:
@@ -105,6 +117,11 @@ def repo_of(image_ref: str) -> str:
         return image_ref.split("@", 1)[0]
     head, sep, tail = image_ref.rpartition(":")
     return head if sep and "/" not in tail else image_ref
+
+
+def rollback_ref(image_ref: str) -> str:
+    """'ghcr.io/you/bot:latest' -> 'ghcr.io/you/bot:rollback' (the build --rollback restores)."""
+    return f"{repo_of(image_ref)}:{ROLLBACK_TAG}"
 
 
 def parse_env(items: list[str] | None) -> dict[str, str]:
@@ -379,9 +396,9 @@ def wait_healthy(name: str, expected_sha: str | None, expected_image: str | None
 # --- the two operations ----------------------------------------------------
 def do_update(args) -> int:
     name = find_bot_container(args.image, args.container)
-    prev_name = name + PREV_SUFFIX
     current = inspect(name)
     old_id = current["Id"]
+    old_image = current["Image"]
     old_sha = parse_env(current["Config"].get("Env")).get("BUILD_SHA") or "unknown"
     log(f"bot container: {name} ({old_id[:12]}, build {old_sha[:12]})")
 
@@ -407,40 +424,47 @@ def do_update(args) -> int:
 
     log(f"new build: {new_sha[:12]}")
     new_args = run_args(current, args.image, name, image_env(args.image))
+    rollback = rollback_ref(args.image)
 
     # 2. dry run: show the plan, touch nothing
     if args.dry_run:
         log("dry run — would run:")
         print("  docker run " + " ".join(mask(new_args)))
+        log(f"dry run — would keep the current image as {rollback} for --rollback")
         if args.panel_db and os.path.exists(args.panel_db):
             log(f"dry run — would re-point {args.panel_db}: {old_id[:12]} -> "
                 "the new container's id (assigned when it is created)")
         log("dry run — nothing changed")
         return 0
 
-    # 3. swap the containers, keeping the current one for rollback. The panel backend is stopped
-    # for the whole swap: if it were left running it could restart the old container by id while
-    # we are renaming it, ending up with two bots connected to Discord at once.
-    if exists(prev_name):
-        docker("rm", "-f", prev_name)
+    # 3. keep the outgoing build reachable for --rollback. The container itself is removed: the
+    # panel finds a server's container by its `gamepanel.serverId` label, and a second labelled
+    # container left behind makes its status sync report the server as stopped.
+    docker("tag", old_image, rollback)
+    log(f"previous build kept as {rollback} ({old_image[:12]})")
+
+    # 4. swap the containers. The panel backend is stopped for the whole swap: if it were left
+    # running it could restart the old container by id while we are replacing it, ending up with
+    # two bots connected to Discord at once.
     backend = _panel_backend(args)
     _stop_backend(backend)
     try:
+        _remove_legacy(name)
         log("starting the new container")
         docker("stop", name)
-        docker("rename", name, prev_name)
+        docker("rm", name)
         docker("run", *new_args)
         new_id = inspect(name)["Id"]
         wait_healthy(name, new_sha, new_image_id, args.timeout)
         log(f"new container is healthy: {name} ({new_id[:12]})")
 
-        # 4. point the panel at the new id, only now that the bot is proven working. If this
+        # 5. point the panel at the new id, only now that the bot is proven working. If this
         # fails the container swap is undone too, so the panel's stored id stays valid.
         if args.panel_db:
             _patch_panel(args, old_id, new_id)
     except Exception:
         log("update failed — rolling back")
-        _rollback_container(name, prev_name)
+        _restore(name, old_image, current, old_sha, args.timeout)
         raise
     finally:
         _start_backend(backend)
@@ -450,13 +474,27 @@ def do_update(args) -> int:
     return 0
 
 
-def _rollback_container(name: str, prev_name: str) -> None:
+def _remove_legacy(name: str) -> None:
+    """Delete containers left behind by older versions of this script.
+
+    They carry the same `gamepanel.serverId` label as the live container, so the panel's status
+    sync can pick the exited one and show the server as stopped although the bot is running.
+    """
+    for legacy in (name + PREV_SUFFIX, name + FAILED_SUFFIX):
+        if exists(legacy):
+            docker("rm", "-f", legacy)
+            log(f"removed leftover {legacy} (it would confuse the panel's status sync)")
+
+
+def _restore(name: str, image_ref: str, template: dict, expected_sha: str | None = None,
+             timeout: int = 45) -> None:
+    """Recreate the bot on `image_ref` from the configuration captured before the swap."""
     docker("rm", "-f", name, check=False)
-    if not exists(prev_name):
-        raise Fail("rollback impossible: the previous container is gone")
-    docker("rename", prev_name, name)
-    docker("start", name)
-    log("previous container restored")
+    docker("run", *run_args(template, image_ref, name, image_env(image_ref)))
+    if expected_sha in (None, "unknown", "dev"):
+        expected_sha = None
+    wait_healthy(name, expected_sha, image_id(image_ref), timeout)
+    log(f"restored {name} on {image_ref}")
 
 
 def _panel_backend(args) -> str | None:
@@ -504,48 +542,45 @@ def _patch_panel(args, old_id: str, new_id: str) -> None:
 
 def do_rollback(args) -> int:
     name = find_bot_container(args.image, args.container)
-    prev_name = name + PREV_SUFFIX
-    if not exists(prev_name):
-        raise Fail(f"nothing to roll back to ({prev_name} does not exist)")
+    target = rollback_ref(args.image)
+    if not exists_image(target):
+        raise Fail(f"nothing to roll back to ({target} does not exist); "
+                   "run sudo bot-update once to establish it")
 
-    current_id = inspect(name)["Id"]
-    prev = inspect(prev_name)
-    prev_id = prev["Id"]
-    prev_sha = parse_env(prev["Config"].get("Env")).get("BUILD_SHA") or "unknown"
-    log(f"rolling {name} back to {prev_id[:12]} (build {prev_sha[:12]})")
+    target_id = image_id(target)
+    target_sha = build_sha(target) or "unknown"
+    current = inspect(name)
+    current_id, current_image = current["Id"], current["Image"]
+    log(f"rolling {name} back to {target_id[:12]} (build {target_sha[:12]})")
+    new_args = run_args(current, target, name, image_env(target))
 
     if args.dry_run:
+        log("dry run — would run:")
+        print("  docker run " + " ".join(mask(new_args)))
         log("dry run — nothing changed")
         return 0
-
-    failed_name = name + FAILED_SUFFIX
-    if exists(failed_name):
-        docker("rm", "-f", failed_name)
 
     backend = _panel_backend(args)
     _stop_backend(backend)
     try:
+        _remove_legacy(name)
         docker("stop", name)
-        docker("rename", name, failed_name)
-        try:
-            docker("rename", prev_name, name)
-            docker("start", name)
-            wait_healthy(name, None, None, args.timeout)
-        except Exception:
-            # the build we tried to go back to is no good either: put the current one back
-            log("rollback target failed to start — restoring the current container")
-            docker("rm", "-f", name, check=False)
-            docker("rename", failed_name, name)
-            docker("start", name, check=False)
-            raise
-        docker("rm", "-f", failed_name, check=False)
-
+        docker("rm", name)
+        docker("run", *new_args)
+        wait_healthy(name, None if target_sha == "unknown" else target_sha,
+                     target_id, args.timeout)
+        # the build we just left becomes the rollback target, so --rollback can toggle back
+        docker("tag", current_image, target)
         if args.panel_db:
-            _patch_panel(args, current_id, prev_id)
+            _patch_panel(args, current_id, target_id)
+    except Exception:
+        log("rollback target failed to start — restoring the current build")
+        _restore(name, current_image, current, timeout=args.timeout)
+        raise
     finally:
         _start_backend(backend)
 
-    log(f"rolled back to build {prev_sha[:12]}")
+    log(f"rolled back to build {target_sha[:12]}")
     return 0
 
 
@@ -567,7 +602,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=45, metavar="SECONDS",
                         help="how long to wait for the new container to become healthy")
     parser.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
-    parser.add_argument("--rollback", action="store_true", help="swap back to the previous container")
+    parser.add_argument("--rollback", action="store_true",
+                        help="recreate the bot from the previous build")
     return parser.parse_args(argv)
 
 

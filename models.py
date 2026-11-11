@@ -126,6 +126,10 @@ def _int(v):
         return None
 
 
+def _str(v):
+    return str(v) if isinstance(v, str) and v else None
+
+
 def _team(v):
     i = _int(v)
     return i if i is not None else (str(v).lower() if v is not None else None)
@@ -341,3 +345,55 @@ def parse_assets(data, image_keys) -> dict[int, Asset]:
                          _slot(_pick(d, "item_slot_type", "slot_type")),
                          _tier(_pick(d, "item_tier", "tier")))
     return out
+
+
+# --- player identity (Steam profile + card name/avatar) --------------------
+@dataclass(frozen=True)
+class SteamProfile:
+    name: str | None
+    avatar_url: str | None
+    profile_url: str | None = None
+
+
+def parse_steam_profile(payload) -> SteamProfile | None:
+    """One row from /v1/players/steam (the endpoint returns a list; tolerate a
+    single object and simple wrappers). Avatar: avatarfull is the largest Steam offers."""
+    if isinstance(payload, list):
+        row = next((x for x in payload if isinstance(x, dict)), None)
+    elif isinstance(payload, dict):
+        if any(k in payload for k in ("personaname", "persona_name", "avatarfull", "account_id")):
+            row = payload
+        else:
+            row = next((x for x in payload.values() if isinstance(x, dict)), None)
+            if row is None:
+                row = next((x for v in payload.values() if isinstance(v, list)
+                            for x in v if isinstance(x, dict)), None)
+    else:
+        row = None
+    if not isinstance(row, dict):
+        return None
+    name = _str(_pick(row, "personaname", "persona_name", "name"))
+    avatar = _str(_pick(row, "avatarfull", "avatarmedium", "avatar"))
+    if not name and not avatar:
+        return None
+    return SteamProfile(name, avatar, _str(_pick(row, "profileurl", "profile_url")))
+
+
+@dataclass(frozen=True)
+class Identity:
+    name: str
+    avatar_url: str | None = None
+
+
+def resolve_identity(statlocker, steam: SteamProfile | None, fallback_name: str | None,
+                     account_id: int) -> Identity:
+    """Card name + avatar. The name keeps its existing precedence (Statlocker, then
+    the saved name, then Steam, then "Account N"); Steam owns the avatar because it
+    works without a Statlocker key, with Statlocker as the fallback."""
+    name = ((getattr(statlocker, "name", None) if statlocker else None)
+            or fallback_name
+            or (steam.name if steam else None)
+            or f"Account {account_id}")
+    avatar = (steam.avatar_url if steam else None) or \
+        (getattr(statlocker, "avatar_url", None) if statlocker else None)
+    return Identity(str(name), avatar or None)

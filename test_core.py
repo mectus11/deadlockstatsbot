@@ -11,8 +11,9 @@ except ImportError:
 
 from db import DB
 from local_icons import LocalIcons, norm
-from models import (BrawlRound, ItemBuy, Match, MatchStats, final_items, match_type, merge_match,
-                    normalize_entry, normalize_metadata, parse_assets, pick_image)
+from models import (BrawlRound, ItemBuy, Match, MatchStats, SteamProfile, final_items,
+                    match_type, merge_match, normalize_entry, normalize_metadata,
+                    parse_assets, parse_steam_profile, pick_image, resolve_identity)
 from statlocker import parse_lobby, parse_profile, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import account_to_steam64, parse_steam_input
@@ -110,6 +111,37 @@ class Assets(unittest.TestCase):
                                ("icon_hero_card",))
         self.assertEqual(wrapped[1].image, "https://x/h.png")
         self.assertEqual(parse_assets(None, ("image",)), {})
+
+
+class SteamIdentity(unittest.TestCase):
+    def test_parse_profile_prefers_largest_avatar(self):
+        p = parse_steam_profile([{
+            "account_id": 1, "personaname": "Mectus", "profileurl": "https://steamcommunity.com/id/x/",
+            "avatar": "a.jpg", "avatarmedium": "b.jpg", "avatarfull": "c.jpg", "friends": [],
+        }])
+        self.assertEqual((p.name, p.avatar_url, p.profile_url),
+                         ("Mectus", "c.jpg", "https://steamcommunity.com/id/x/"))
+        self.assertEqual(parse_steam_profile({"personaname": "X", "avatarmedium": "b.jpg"}).avatar_url, "b.jpg")
+        self.assertEqual(parse_steam_profile({"personaname": "X", "avatar": "a.jpg"}).avatar_url, "a.jpg")
+
+    def test_parse_profile_bad_shapes(self):
+        for bad in (None, [], {}, {"personaname": None, "avatarfull": None}, "junk", [None, 3]):
+            self.assertIsNone(parse_steam_profile(bad), bad)
+        self.assertEqual(parse_steam_profile({"players": [{"personaname": "Y"}]}).name, "Y")
+
+    def test_avatar_and_name_precedence(self):
+        sl = types.SimpleNamespace(name="Statlocker", avatar_url="sl.jpg")
+        steam = SteamProfile("Steam", "steam.jpg")
+        cases = [
+            ((sl, steam, "Saved"), ("Statlocker", "steam.jpg")),
+            ((sl, None, "Saved"), ("Statlocker", "sl.jpg")),
+            ((None, steam, "Saved"), ("Saved", "steam.jpg")),
+            ((None, SteamProfile("Steam", None), None), ("Steam", None)),
+            ((None, None, None), ("Account 7", None)),
+        ]
+        for args, want in cases:
+            i = resolve_identity(*args, 7)
+            self.assertEqual((i.name, i.avatar_url), want, args)
 
 
 class LocalIconFiles(unittest.TestCase):

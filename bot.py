@@ -25,7 +25,7 @@ from db import DB
 from deadlock_api import ApiUnavailable, DeadlockAPI
 from images import ImageStore
 from local_icons import LocalIcons
-from models import Match, match_type, merge_match
+from models import Match, match_type, merge_match, resolve_identity
 from statlocker import StatlockerAPI, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import STEAM_INPUT_HELP, parse_steam_input
@@ -100,31 +100,27 @@ class StatsBot(discord.Client):
             log.info("unmatched local files (first 15, check names against the real item list): %s",
                      ", ".join(sorted(orphans)[:15]))
 
-    async def display_name(self, account_id: int, profile, fallback: str | None = None) -> str:
-        if profile and profile.name:
-            return profile.name
-        if fallback:
-            return fallback
-        return (await self.dl.steam_name(account_id)) or f"Account {account_id}"
-
     async def build_stats_card(self, account_id: int, history: list[Match] | None = None,
                                fallback_name: str | None = None):
         history = history if history is not None else await self.dl.match_history(account_id)
-        profile = await self.sl.profile(account_id) if self.sl.enabled else None
+        profile, steam = await asyncio.gather(self.sl.profile(account_id),
+                                              self.dl.steam_profile(account_id))
         if not history and not profile:
             return None
+        identity = resolve_identity(profile, steam, fallback_name, account_id)
         overall = compute_overall(history)
         hero_cat = await self.dl.heroes()
         top = [(h, hero_cat.get(h.hero_id)) for h in overall.top_heroes]
-        pics = await self.images.get_many([a.image if a else None for _, a in top] + (
-            [profile.avatar_url, rank_badge_url(profile.rank_number)] if profile else []))
+        pics = await self.images.get_many(
+            [a.image if a else None for _, a in top]
+            + [identity.avatar_url, rank_badge_url(profile.rank_number) if profile else None])
         return cards.render_stats_card(cards.StatsCardData(
-            name=await self.display_name(account_id, profile, fallback_name),
+            name=identity.name,
             account_id=account_id,
             overall=overall,
             heroes=[cards.HeroRow(a.name if a else f"Hero #{h.hero_id}", h.games, h.winrate,
                                   pics.get(a.image) if a else None) for h, a in top],
-            avatar=pics.get(profile.avatar_url) if profile else None,
+            avatar=pics.get(identity.avatar_url) if identity.avatar_url else None,
             rank_name=rank_name(profile.rank_number) if profile else None,
             rank_badge=pics.get(rank_badge_url(profile.rank_number)) if profile else None,
             pp_score=profile.pp_score if profile else None,
@@ -137,16 +133,18 @@ class StatsBot(discord.Client):
         this only needs the match-history entries themselves (already has K/D/A/hero/duration),
         so it's a single fast request with no per-match detail lookups."""
         history = history if history is not None else await self.dl.match_history(account_id)
-        profile = await self.sl.profile(account_id) if self.sl.enabled else None
+        profile, steam = await asyncio.gather(self.sl.profile(account_id),
+                                              self.dl.steam_profile(account_id))
         if not history and not profile:
             return None
+        identity = resolve_identity(profile, steam, fallback_name, account_id)
         recent = history[:count]
         hero_cat = await self.dl.heroes()
         heroes = [hero_cat.get(m.hero_id) for m in recent]
         pics = await self.images.get_many([h.image if h else None for h in heroes] +
-                                          ([profile.avatar_url] if profile else []))
+                                          [identity.avatar_url])
         return cards.render_matches_card(cards.MatchesCardData(
-            name=await self.display_name(account_id, profile, fallback_name),
+            name=identity.name,
             account_id=account_id,
             matches=[cards.MatchRow(
                 hero=h.name if h else f"Hero #{m.hero_id}", won=m.won, kills=m.kills, deaths=m.deaths,
@@ -154,7 +152,7 @@ class StatsBot(discord.Client):
                 hero_icon=pics.get(h.image) if h else None,
                 mode=_short_mode(m), mode_kind=match_type(m)[0],
             ) for m, h in zip(recent, heroes)],
-            avatar=pics.get(profile.avatar_url) if profile else None,
+            avatar=pics.get(identity.avatar_url) if identity.avatar_url else None,
             statlocker=profile is not None,
         ))
 
@@ -168,8 +166,10 @@ class StatsBot(discord.Client):
         """track=(discord_id, guild_id): compares PP to the value stored for this player's own
         account and remembers the new one, so the next match card can show the change. Only pass
         this for the player's own card, never someone else's steamid."""
-        profile = await self.sl.profile(account_id) if self.sl.enabled else None
-        lobby = await self.sl.lobby(m.match_id, account_id) if self.sl.enabled else None
+        profile, lobby, steam = await asyncio.gather(
+            self.sl.profile(account_id), self.sl.lobby(m.match_id, account_id),
+            self.dl.steam_profile(account_id))
+        identity = resolve_identity(profile, steam, fallback_name, account_id)
         pp_delta = None
         if track and profile and profile.pp_score is not None:
             baseline = self.db.get_link(*track)
@@ -184,11 +184,11 @@ class StatsBot(discord.Client):
         known = [a for _, a in catalogued if a and a.slot in SHOP_SLOTS]
         unknown = sum(1 for _, a in catalogued if a is None)
         own = {a.id: self.local.get(a.name, a.tier) for a in known}  # your files in assets/items win
-        pics = await self.images.get_many([hero.image if hero else None, profile.avatar_url if profile else None,
+        pics = await self.images.get_many([hero.image if hero else None, identity.avatar_url,
                                            *(a.image for a in known if not own[a.id])])
         mode_kind, mode = match_type(m)
         return cards.render_match_card(cards.MatchCardData(
-            name=await self.display_name(account_id, profile, fallback_name),
+            name=identity.name,
             hero=hero.name if hero else await self.dl.hero_name(m.hero_id),
             match_id=m.match_id, won=m.won, kills=m.kills, deaths=m.deaths, assists=m.assists,
             duration_s=m.duration_s, start_time=m.start_time, net_worth=m.net_worth,
@@ -196,7 +196,7 @@ class StatsBot(discord.Client):
             mode=mode, mode_kind=mode_kind, stats=m.stats,
             brawl_score=m.brawl_score, brawl_round_avg_s=m.brawl_avg_round_s if m.brawl_score else None,
             hero_icon=pics.get(hero.image) if hero else None,
-            avatar=pics.get(profile.avatar_url) if profile else None,
+            avatar=pics.get(identity.avatar_url) if identity.avatar_url else None,
             items=[cards.ItemView(a.name, own[a.id] or pics.get(a.image), a.slot, a.tier) for a in known],
             unnamed_items=unknown,
             own_lobby_rank=rank_name(lobby.own_rank) if lobby else None,

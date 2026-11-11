@@ -1,38 +1,46 @@
 """Render stat cards as PNG images with Pillow.
 
-Drawn at 2x and downsampled so edges and text are smooth. To use another font put
-`bold.ttf` / `regular.ttf` in ./assets/fonts; otherwise DejaVu / Arial / Liberation
-are tried, then Pillow's built-in font. Any image that is missing or can't be
-decoded is replaced by a labelled placeholder tile.
+Theme v2: 1940s New York noir, Art Deco brasswork, absinthe shadow and occult
+geometry. The layout is unchanged from v1; the visual language is new: a poster
+frame, stepped corner rules, fluted rails, stamped plates, gauges, duotone hero
+art and a Maelstrom sigil. Drawn at 2x and downsampled so edges and text are smooth.
+
+Display type is Cinzel, labels are Josefin Sans, numbers and body are Barlow
+Condensed (assets/fonts, OFL). If a face is missing the renderer falls back to
+the system fonts, then Pillow's built-in font. Any image that is missing or can't
+be decoded is replaced by a labelled placeholder tile.
 """
 import io
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from math import ceil
+from math import ceil, cos, radians, sin
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from models import MatchStats
 from stats import Overall
+from theme import (BRASS, EMBER, EMERALD, FAINT, GOLD, GREEN, INK, INK_BOTTOM,
+                   INK_TOP, LINE, LINE_2, LINE_3, MINT, MODE_COLORS, MUTED, PANEL,
+                   PANEL_2, RED, SLOT_COLORS, SLOT_ORDER, STEEL, TEXT, VIOLET)
 
 log = logging.getLogger("cards")
 
-BG = (11, 13, 15)
-PANEL = (21, 25, 29)
-PANEL_LINE = (38, 45, 52)
-TEXT = (240, 244, 246)
-MUTED = (138, 150, 160)
-GREEN = (74, 222, 128)
-RED = (239, 84, 84)
-AMBER = (245, 190, 70)
-SOUL = (84, 212, 232)
-SLOT_COLORS = {"weapon": (240, 160, 60), "vitality": (110, 200, 110), "spirit": (176, 124, 236)}
-SLOT_ORDER = {"weapon": 0, "vitality": 1, "spirit": 2}
-MODE_COLORS = {"ranked": AMBER, "brawl": (240, 160, 60), "bot": (120, 170, 240),
-               "standard": MUTED, "other": MUTED}
-STATS_PANEL_H = 186
+# backwards-compatible aliases for anything outside this module that imported them
+BG = INK
+PANEL_LINE = LINE
+AMBER = EMBER
+SOUL = MINT
+
+# --- visual density ---------------------------------------------------------
+# "minimal"  single rules, no sigil
+# "balanced" double rules, corner steps, light sigil, fine grain
+# "ornate"   full Art Deco: double rules with lozenges, fluted caps, strong sigil
+ORNAMENT_LEVEL = "balanced"
+TEXTURE = "print"  # "print" adds grain + vignette; "clean" leaves flat colour
+DISPLAY_FACE = "cinzel"  # "cinzel" | "bodoni" | "marcellus"
+
 ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V"}
 SOUL_FILE = Path(__file__).parent / "assets" / "souls.png"  # drop the real souls icon here to use it
 _soul_cache: list = []
@@ -41,19 +49,63 @@ SCALE = 2
 ITEM_SIZE, ITEM_GAP, ITEMS_PER_ROW, MAX_ITEMS = 64, 8, 12, 24
 ITEM_LABEL_H = 15  # a name under each icon, so items are identifiable even when the art is unfamiliar
 ITEM_CELL_H = ITEM_SIZE + ITEM_LABEL_H
+STATS_PANEL_H = 196
 FONT_DIR = Path(__file__).parent / "assets" / "fonts"
-_FONT_NAMES = {
-    True: ["bold.ttf", "DejaVuSans-Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"],
-    False: ["regular.ttf", "DejaVuSans.ttf", "arial.ttf", "LiberationSans-Regular.ttf"],
+
+# (file, variable-font weight or None)
+_FONT_FILES = {
+    "display": {
+        True: [("Cinzel-Variable.ttf", 700), ("DejaVuSerif-Bold.ttf", None),
+               ("LiberationSerif-Bold.ttf", None), ("timesbd.ttf", None)],
+        False: [("Cinzel-Variable.ttf", 500), ("DejaVuSerif.ttf", None),
+                ("LiberationSerif-Regular.ttf", None), ("times.ttf", None)],
+    },
+    "label": {
+        True: [("JosefinSans-Variable.ttf", 600), ("DejaVuSans-Bold.ttf", None),
+               ("arialbd.ttf", None), ("LiberationSans-Bold.ttf", None)],
+        False: [("JosefinSans-Variable.ttf", 400), ("DejaVuSans.ttf", None),
+                ("arial.ttf", None), ("LiberationSans-Regular.ttf", None)],
+    },
+    # long small text (item names) reads better in a narrow neutral face
+    "body": {
+        True: [("BarlowCondensed-SemiBold.ttf", None), ("bold.ttf", None),
+               ("DejaVuSans-Bold.ttf", None), ("arialbd.ttf", None)],
+        False: [("BarlowCondensed-Regular.ttf", None), ("regular.ttf", None),
+                ("DejaVuSans.ttf", None), ("arial.ttf", None)],
+    },
+    # scoreboard numerals
+    "number": {
+        True: [("BarlowCondensed-Bold.ttf", None), ("BarlowCondensed-SemiBold.ttf", None),
+               ("bold.ttf", None), ("DejaVuSans-Bold.ttf", None)],
+        False: [("BarlowCondensed-Medium.ttf", None), ("BarlowCondensed-Regular.ttf", None),
+                ("regular.ttf", None), ("DejaVuSans.ttf", None)],
+    },
 }
-_font_cache: dict[tuple[int, bool], ImageFont.ImageFont] = {}
+_font_cache: dict[tuple, ImageFont.ImageFont] = {}
 
 
-def _font(size: int, bold: bool) -> ImageFont.ImageFont:
-    key = (size, bold)
+def set_display_face(name: str):
+    """Switch the display face for mockup comparisons; clears the font cache."""
+    global DISPLAY_FACE
+    DISPLAY_FACE = name
+    _font_cache.clear()
+
+
+def _font_spec(family: str, bold: bool):
+    spec = _FONT_FILES.get(family, _FONT_FILES["display"])[bold]
+    if family == "display":
+        if DISPLAY_FACE == "bodoni":
+            spec = [("BodoniModa-Variable.ttf", 700 if bold else 500)] + spec
+        elif DISPLAY_FACE == "marcellus":
+            spec = [("Marcellus-Regular.ttf", None)] + spec
+    return spec
+
+
+def _font(size: int, bold: bool, family: str = "display") -> ImageFont.ImageFont:
+    key = (size, bold, family, DISPLAY_FACE if family == "display" else "")
     if key not in _font_cache:
         font = None
-        for name in _FONT_NAMES[bold]:
+        for name, weight in _font_spec(family, bold):
             for candidate in (str(FONT_DIR / name), name):
                 try:
                     font = ImageFont.truetype(candidate, size)
@@ -61,6 +113,14 @@ def _font(size: int, bold: bool) -> ImageFont.ImageFont:
                 except OSError:
                     continue
             if font:
+                if weight is not None:
+                    try:
+                        if "Bodoni" in name:
+                            font.set_variation_by_axes([weight, min(96.0, max(11.0, size / 2))])
+                        else:
+                            font.set_variation_by_axes([weight])
+                    except Exception:
+                        pass
                 break
         _font_cache[key] = font or ImageFont.load_default(size)
     return _font_cache[key]
@@ -86,32 +146,362 @@ def _fmt(v, spec="{:.0f}", suffix="") -> str:
     return "-" if v is None else spec.format(v) + suffix
 
 
+def _mix(a, b, t: float):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def _chamfer(x, y, w, h, cut):
+    cut = min(cut, w / 2, h / 2)
+    return [(x + cut, y), (x + w - cut, y), (x + w, y + cut), (x + w, y + h - cut),
+            (x + w - cut, y + h), (x + cut, y + h), (x, y + h - cut), (x, y + cut)]
+
+
 class Canvas:
     def __init__(self, w: int, h: int):
         self.w, self.h, self.s = w, h, SCALE
-        self.img = Image.new("RGB", (w * self.s, h * self.s), BG)
+        self._finished = False
+        self._background()
+        self.frame()
+
+    def _background(self):
+        """A barely-there vertical gradient, so large dark areas don't look flat."""
+        s = self.s
+        hpx = self.h * s
+        grad = Image.new("RGB", (1, hpx))
+        grad.putdata([tuple(int(round(INK_TOP[i] + (INK_BOTTOM[i] - INK_TOP[i]) * (y / max(1, hpx - 1))))
+                            for i in range(3)) for y in range(hpx)])
+        self.img = grad.resize((self.w * s, hpx), Image.BILINEAR)
         self.d = ImageDraw.Draw(self.img)
 
-    # --- primitives ---------------------------------------------------------
-    def rect(self, x, y, w, h, fill=PANEL, r=14, outline=None, width=1):
+    # --- low level ----------------------------------------------------------
+    def _pts(self, pts):
         s = self.s
-        self.d.rounded_rectangle((x * s, y * s, (x + w) * s, (y + h) * s), radius=r * s, fill=fill,
-                                 outline=outline, width=width * s if outline else 0)
+        return [(x * s, y * s) for x, y in pts]
 
-    def text(self, x, y, txt, size=16, fill=TEXT, bold=False, anchor="la"):
-        self.d.text((x * self.s, y * self.s), str(txt), font=_font(size * self.s, bold),
+    def rect(self, x, y, w, h, fill=PANEL, r=0, outline=None, width=1):
+        """Plain rectangle (kept for internal fills); rounded corners are gone by design."""
+        s = self.s
+        self.d.rectangle((x * s, y * s, (x + w) * s, (y + h) * s), fill=fill)
+        if outline:
+            self.d.rectangle((x * s, y * s, (x + w) * s, (y + h) * s),
+                             outline=outline, width=max(1, int(width * s)))
+
+    def panel(self, x, y, w, h, fill=PANEL, outline=LINE, cut=8, rail=None, rail_w=4, width=1):
+        """Chamfered poster panel: hairline frame, stamped inner rule, fluted accent rail."""
+        s = self.s
+        pts = _chamfer(x, y, w, h, cut)
+        self.d.polygon(self._pts(pts), fill=fill)
+        if rail:
+            rx, ry, rh = x + 1, y + cut, h - 2 * cut
+            self.d.polygon(self._pts([(rx, ry), (rx + rail_w, ry), (rx + rail_w, ry + rh),
+                                      (rx, ry + rh)]), fill=rail)
+            if ORNAMENT_LEVEL != "minimal" and rail_w >= 3:
+                for i in (1, 2):  # flutes cut into the rail
+                    fx = rx + rail_w * i / 3
+                    self.d.line((fx * s, ry * s, fx * s, (ry + rh) * s),
+                                fill=_mix(rail, INK, 0.5), width=1)
+            if ORNAMENT_LEVEL == "ornate":
+                self.lozenge(rx + rail_w / 2, ry - 4, 3, GOLD, fill=INK)
+                self.lozenge(rx + rail_w / 2, ry + rh + 4, 3, GOLD, fill=INK)
+            if h > 48:  # gold inner rule beside the rail
+                self.d.line(((x + rail_w + 5) * s, (y + cut + 5) * s,
+                             (x + rail_w + 5) * s, (y + h - cut - 5) * s),
+                            fill=_mix(fill, LINE_3, 0.5), width=1)
+        if ORNAMENT_LEVEL == "ornate" and w >= 120 and h >= 40:
+            corners = [(x + 3, y + 3, 1, 1), (x + w - 3, y + 3, -1, 1),
+                       (x + 3, y + h - 3, 1, -1), (x + w - 3, y + h - 3, -1, -1)]
+            if rail:
+                corners = corners[1::2]  # right-hand corners only, clear of the rail
+            elif h < 110:
+                corners = [corners[1], corners[2]]  # top-right + bottom-left
+            for cx, cy, sx, sy in corners:
+                self._steps(cx, cy, sx, sy, _mix(fill, GOLD, 0.34))
+        elif outline and ORNAMENT_LEVEL != "minimal" and w >= 120 and h >= 40:
+            ipts = _chamfer(x + 3, y + 3, w - 6, h - 6, max(2, cut - 2))
+            self.d.line(self._pts(ipts) + [self._pts(ipts)[0]],
+                        fill=_mix(fill, LINE_2, 0.6), width=1)
+        if outline:
+            line = self._pts(pts) + [self._pts(pts)[0]]
+            self.d.line(line, fill=outline, width=max(1, int(round(width * s))), joint="curve")
+
+    def _steps(self, x, y, sx, sy, color):
+        """Nested Art Deco corner steps (three short Ls)."""
+        s = self.s
+        for i, off in enumerate((0, 3, 6)):
+            ln = 16 - i * 4
+            self.d.line(((x + sx * off) * s, (y + sy * off) * s,
+                         (x + sx * (off + ln)) * s, (y + sy * off) * s), fill=color, width=1)
+            self.d.line(((x + sx * off) * s, (y + sy * off) * s,
+                         (x + sx * off) * s, (y + sy * (off + ln)) * s), fill=color, width=1)
+
+
+    def frame(self):
+        """Poster frame: double rule around the card, stepped corner marks, centre lozenges."""
+        s = self.s
+        inset = 13
+        outer = _mix(INK, BRASS, 0.52)
+        self.d.rectangle((inset * s, inset * s, (self.w - inset) * s, (self.h - inset) * s),
+                         outline=outer, width=2)
+        if ORNAMENT_LEVEL == "minimal":
+            return
+        self.d.rectangle(((inset + 4) * s, (inset + 4) * s,
+                          (self.w - inset - 4) * s, (self.h - inset - 4) * s),
+                         outline=_mix(INK, BRASS, 0.26), width=1)
+        if ORNAMENT_LEVEL != "ornate":
+            return
+        # stepped corner brackets
+        x0, y0, x1, y1 = inset + 8, inset + 8, self.w - inset - 8, self.h - inset - 8
+        for cx, cy, sx, sy in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
+            for i, off in enumerate((0, 4, 8)):
+                ln = 20 - i * 5
+                col = _mix(INK, GOLD if i == 0 else BRASS, 0.55 - i * 0.1)
+                self.d.line(((cx + sx * off) * s, (cy + sy * off) * s,
+                             (cx + sx * (off + ln)) * s, (cy + sy * off) * s), fill=col, width=1)
+                self.d.line(((cx + sx * off) * s, (cy + sy * off) * s,
+                             (cx + sx * off) * s, (cy + sy * (off + ln)) * s), fill=col, width=1)
+        self.lozenge(self.w / 2, inset + 4, 3.2, GOLD, fill=INK)
+        self.lozenge(self.w / 2, self.h - inset - 4, 3.2, GOLD, fill=INK)
+
+    def lozenge(self, cx, cy, r, color=GOLD, fill=None, width=1):
+        """Small diamond, the recurring Art Deco punctuation mark."""
+        s = self.s
+        pts = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+        if fill is not None:
+            self.d.polygon(self._pts(pts), fill=fill)
+        self.d.line(self._pts(pts) + [self._pts(pts)[0]], fill=color,
+                    width=max(1, int(round(width * s))))
+
+    def bracket(self, x, y, size=12, color=LINE_2, corner="tl", width=1):
+        """Small L-shaped corner mark."""
+        s = self.s
+        lw = max(1, int(round(width * s)))
+        if corner == "tl":
+            self.d.line([(x * s, y * s), ((x + size) * s, y * s)], fill=color, width=lw)
+            self.d.line([(x * s, y * s), (x * s, (y + size) * s)], fill=color, width=lw)
+        else:  # bottom-right
+            self.d.line([((x - size) * s, y * s), (x * s, y * s)], fill=color, width=lw)
+            self.d.line([(x * s, y * s), (x * s, (y - size) * s)], fill=color, width=lw)
+
+    def divider(self, x, y, w, color=LINE, width=1, double=False, lozenge=False, major=False):
+        s = self.s
+        if major and ORNAMENT_LEVEL == "ornate":
+            double = lozenge = True
+        lw = max(1, int(round(width * s)))
+        self.d.line((x * s, y * s, (x + w) * s, y * s), fill=color, width=lw)
+        if double:
+            self.d.line((x * s, (y + 3) * s, (x + w) * s, (y + 3) * s),
+                        fill=_mix(color, INK, 0.35), width=1)
+        if lozenge:
+            self.lozenge(x + w / 2, y + (1.5 if double else 0), 3.4, GOLD, fill=INK)
+        if major and ORNAMENT_LEVEL == "ornate":
+            for ex in (x, x + w):
+                self.d.line((ex * s, (y - 3) * s, ex * s, (y + 6) * s),
+                            fill=_mix(color, GOLD, 0.45), width=1)
+
+    def text(self, x, y, txt, size=16, fill=TEXT, bold=False, anchor="la", family="number"):
+        self.d.text((x * self.s, y * self.s), str(txt), font=_font(size * self.s, bold, family),
                     fill=fill, anchor=anchor)
 
-    def text_w(self, txt, size=16, bold=False) -> float:
-        return self.d.textlength(str(txt), font=_font(size * self.s, bold)) / self.s
+    def text_w(self, txt, size=16, bold=False, family="number") -> float:
+        return self.d.textlength(str(txt), font=_font(size * self.s, bold, family)) / self.s
 
-    def fit(self, txt: str, size: int, bold: bool, max_w: float) -> str:
-        if self.text_w(txt, size, bold) <= max_w:
+    def tracked_w(self, txt, size=16, bold=False, tracking=0.0, family="label") -> float:
+        txt = str(txt)
+        if not txt:
+            return 0.0
+        font = _font(size * self.s, bold, family)
+        total = sum(self.d.textlength(ch, font=font) for ch in txt)
+        total += tracking * self.s * (len(txt) - 1)
+        return total / self.s
+
+    def tracked_text(self, x, y, txt, size=16, fill=TEXT, bold=False, anchor="la",
+                     tracking=1.0, family="label") -> float:
+        """Letter-spaced text. PIL has no tracking, so glyphs are placed one by one.
+
+        Returns the drawn width in card pixels. Vertical anchors follow PIL's names
+        (a=top of the font box, m=middle, s=baseline, d=descender).
+        """
+        txt = str(txt)
+        if not txt:
+            return 0.0
+        s = self.s
+        font = _font(size * s, bold, family)
+        widths = [self.d.textlength(ch, font=font) for ch in txt]
+        total = sum(widths) + tracking * s * (len(txt) - 1)
+        h_anchor, v_anchor = anchor[0], anchor[1]
+        if h_anchor == "l":
+            x0 = x * s
+        elif h_anchor == "m":
+            x0 = x * s - total / 2
+        else:
+            x0 = x * s - total
+        ascent, descent = font.getmetrics()
+        if v_anchor == "a":
+            top = y * s
+        elif v_anchor == "m":
+            top = y * s - (ascent + descent) / 2
+        elif v_anchor == "d":
+            top = y * s - (ascent + descent)
+        else:  # baseline
+            top = y * s - ascent
+        baseline = top + ascent
+        px = x0
+        for ch, w in zip(txt, widths):
+            self.d.text((px, baseline), ch, font=font, fill=fill, anchor="ls")
+            px += w + tracking * s
+        return total / s
+
+    def fit(self, txt: str, size: int, bold: bool, max_w: float, family="number") -> str:
+        txt = str(txt)
+        if self.text_w(txt, size, bold, family) <= max_w:
             return txt
-        while len(txt) > 1 and self.text_w(txt + "...", size, bold) > max_w:
+        while len(txt) > 1 and self.text_w(txt + "...", size, bold, family) > max_w:
             txt = txt[:-1]
         return txt + "..."
 
+    def fit_tracked(self, txt: str, size: int, bold: bool, max_w: float, tracking=1.0,
+                    family="label") -> str:
+        txt = str(txt)
+        if self.tracked_w(txt, size, bold, tracking, family) <= max_w:
+            return txt
+        while len(txt) > 1 and self.tracked_w(txt + "...", size, bold, tracking, family) > max_w:
+            txt = txt[:-1]
+        return txt + "..."
+
+    # --- motifs -------------------------------------------------------------
+    def tag(self, x, y, txt, color=MUTED, size=9, height=None, tracking=1.2) -> float:
+        """Stamped plate: tinted fill, double hairline border, tracked uppercase text."""
+        h = height or size + 8
+        tw = self.tracked_w(txt, size, True, tracking)
+        w = tw + 14
+        pts = _chamfer(x, y, w, h, 4)
+        self.d.polygon(self._pts(pts), fill=_mix(PANEL, color, 0.15))
+        if ORNAMENT_LEVEL != "minimal" and w > 30:
+            ipts = _chamfer(x + 2, y + 2, w - 4, h - 4, 3)
+            self.d.line(self._pts(ipts) + [self._pts(ipts)[0]],
+                        fill=_mix(PANEL, color, 0.38), width=1)
+        self.d.line(self._pts(pts) + [self._pts(pts)[0]], fill=_mix(PANEL, color, 0.82),
+                    width=max(1, int(self.s * 0.75)), joint="curve")
+        self.tracked_text(x + w / 2, y + h / 2, txt, size, color, True, "mm", tracking)
+        return w
+
+    def meter(self, x, y, w, pct, color=GREEN, segments=10, h=8):
+        """Continuous gauge with tick divisions and an Art Deco end lozenge."""
+        pct = 0 if pct is None else max(0, min(100, pct))
+        s = self.s
+        self.d.rectangle((x * s, y * s, (x + w) * s, (y + h) * s),
+                         fill=_mix(PANEL, INK, 0.35), outline=LINE, width=1)
+        fw = w * pct / 100
+        if fw > 0:
+            self.d.rectangle((x * s, y * s, (x + fw) * s, (y + h) * s), fill=color)
+            self.d.line(((x + 1) * s, (y + 1) * s, (x + max(1, fw - 1)) * s, (y + 1) * s),
+                        fill=_mix(color, TEXT, 0.35), width=1)
+        if ORNAMENT_LEVEL != "minimal":
+            for i in range(1, segments):
+                tx = x + w * i / segments
+                self.d.line((tx * s, y * s, tx * s, (y + h) * s),
+                            fill=_mix(INK, color, 0.3) if tx <= x + fw else LINE, width=1)
+        if ORNAMENT_LEVEL == "ornate" and fw > 2:
+            self.lozenge(x + fw, y + h / 2, h * 0.62, GOLD, fill=INK)
+
+    def panel_header(self, x, y, w, title, right="", color=MUTED, right_color=FAINT):
+        """Section title + optional right-aligned meta + double rule. Returns the content y."""
+        if ORNAMENT_LEVEL != "minimal":
+            self.lozenge(x + 3, y + 5, 3.2, GOLD, fill=INK)
+            tx = x + 11
+        else:
+            tx = x
+        self.tracked_text(tx, y, title, 10, color, True, "la", 2.8)
+        if right:
+            self.tracked_text(x + w, y, right, 9, right_color, True, "ra", 1.6)
+        self.divider(x, y + 18, w, LINE_2, double=ORNAMENT_LEVEL != "minimal",
+                     lozenge=ORNAMENT_LEVEL == "ornate")
+        if ORNAMENT_LEVEL == "ornate":
+            for ex in (x, x + w):
+                self.d.line((ex * self.s, (y + 15) * self.s, ex * self.s, (y + 24) * self.s),
+                            fill=_mix(LINE_2, GOLD, 0.4), width=1)
+        return y + 30
+
+    def hatch(self, x, y, w, h, color=LINE, step=7, alpha=70):
+        """Diagonal hairlines, used sparingly behind header bands."""
+        s = self.s
+        tw, th = max(1, int(w * s)), max(1, int(h * s))
+        ov = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        od = ImageDraw.Draw(ov)
+        for off in range(-th, tw, max(1, int(step * s))):
+            od.line([(off, th), (off + th, 0)], fill=color + (alpha,), width=1)
+        self.img.paste(ov.convert("RGB"), (int(x * s), int(y * s)), ov)
+
+    def watermark(self, data: bytes | None, x, y, w, h, alpha=0.34, cut=8):
+        """Hero art as a brass/absinthe duotone, faded into the right side of a panel."""
+        im = _load(data)
+        if im is None:
+            return
+        s = self.s
+        tw, th = max(1, int(w * s)), max(1, int(h * s))
+        im = im.convert("RGB")
+        ratio = th / im.height
+        nw = max(1, int(im.width * ratio))
+        im = im.resize((nw, th), Image.LANCZOS)
+        if nw > tw:
+            left = max(0, (nw - tw) // 2)
+            im = im.crop((left, 0, left + tw, th))
+        else:
+            bg = Image.new("RGB", (tw, th), INK)
+            bg.paste(im, ((tw - nw) // 2, 0))
+            im = bg
+        # duotone: emerald in the mids, brass in the highlights, ink in the shadows
+        gray = ImageOps.grayscale(im)
+        im = ImageOps.colorize(gray, black=INK, mid=_mix(INK, EMERALD, 0.42),
+                               white=_mix(INK, GOLD, 0.72))
+        im = Image.blend(im, Image.new("RGB", (tw, th), INK), 0.62)
+        im = im.filter(ImageFilter.GaussianBlur(2 * s))
+
+        mask = Image.new("L", (tw, th), 0)
+        ImageDraw.Draw(mask).polygon(
+            [(min(cut * s, tw / 2), 0), (tw - min(cut * s, tw / 2), 0),
+             (tw, min(cut * s, th / 2)), (tw, th - min(cut * s, th / 2)),
+             (tw - min(cut * s, tw / 2), th), (min(cut * s, tw / 2), th),
+             (0, th - min(cut * s, th / 2)), (0, min(cut * s, th / 2))], fill=255)
+        fade = Image.new("L", (tw, 1))
+        fade.putdata([int(255 * alpha * (i / max(1, tw - 1)) ** 1.6) for i in range(tw)])
+        mask = ImageChops.multiply(mask, fade.resize((tw, th)))
+        self.img.paste(im, (int(x * s), int(y * s)), mask)
+
+    def sigil(self, cx, cy, r, color=BRASS, alpha=42):
+        """Maelstrom sigil: broken concentric rings, radial ticks and a centre diamond."""
+        if ORNAMENT_LEVEL == "minimal":
+            return
+        if ORNAMENT_LEVEL == "balanced":
+            alpha = int(alpha * 0.68)
+        s = self.s
+        pad = 4
+        size = int((2 * r + pad * 2) * s)
+        ov = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        od = ImageDraw.Draw(ov)
+        X = Y = size / 2
+
+        def ring(rr, a0, a1, w=2):
+            od.arc((X - rr * s, Y - rr * s, X + rr * s, Y + rr * s), a0, a1,
+                   fill=color + (alpha,), width=max(1, int(w * s)))
+
+        ring(r, -62, 38)
+        ring(r, 58, 158)
+        ring(r, 178, 278)
+        ring(r * 0.72, -18, 118, 1.5)
+        ring(r * 0.72, 142, 258, 1.5)
+        ring(r * 0.46, 0, 360, 1)
+        for i in range(8):  # radial ticks between the middle and outer rings
+            a = radians(i * 45)
+            od.line((X + 0.78 * r * s * cos(a), Y + 0.78 * r * s * sin(a),
+                     X + 0.92 * r * s * cos(a), Y + 0.92 * r * s * sin(a)),
+                    fill=color + (alpha,), width=max(1, int(s * 0.75)))
+        c = 0.16 * r * s
+        od.polygon([(X, Y - c), (X + c, Y), (X, Y + c), (X - c, Y)],
+                   outline=color + (alpha,), width=max(1, int(s * 0.75)))
+        self.img.paste(ov.convert("RGB"), (int(cx * s - size / 2), int(cy * s - size / 2)), ov)
+
+    # --- image tiles --------------------------------------------------------
     def soul(self, cx, cy, size, color=SOUL):
         """Souls icon: assets/souls.png if present, else a drawn teardrop."""
         s = self.s
@@ -133,13 +523,6 @@ class Canvas:
         self.d.ellipse((X - 0.35 * br - hl, by - 0.1 * br - hl, X - 0.35 * br + hl, by - 0.1 * br + hl),
                        fill=(205, 246, 252))
 
-    def pill(self, x, y, txt, color, size=12) -> float:
-        """Small rounded badge (e.g. a win/loss streak); returns its width."""
-        w, h = self.text_w(txt, size, True) + 16, size + 10
-        self.rect(x, y, w, h, fill=tuple(int(v * 0.22) for v in color), r=h / 2, outline=color, width=1)
-        self.text(x + w / 2, y + h / 2, txt, size, color, True, "mm")
-        return w
-
     def tri(self, cx, cy, size, up: bool, color):
         """A small filled up/down triangle (for a rank/PP change) — drawn, no icon file needed."""
         s, h = self.s, size * 0.9
@@ -147,68 +530,84 @@ class Canvas:
               [(cx, cy + h / 2), (cx - size / 2, cy - h / 2), (cx + size / 2, cy - h / 2)]
         self.d.polygon([(px * s, py * s) for px, py in pts], fill=color)
 
-    def icon(self, data: bytes | None, x, y, w, h, r=10, border=None, label="", focus=(0.5, 0.5), bg=PANEL_LINE,
-             fit="cover"):
-        """Rounded image tile; labelled placeholder if no image.
-        fit="cover" crops to fill (good for portraits, with `focus`); fit="contain" shows the
-        whole image letterboxed (good for item icons, so none of the artwork gets cropped off)."""
+    def icon(self, data: bytes | None, x, y, w, h, cut=6, border=None, label="", focus=(0.5, 0.5),
+             bg=PANEL_2, fit="cover", width=1):
+        """Chamfered image tile; labelled placeholder if no image.
+        fit="cover" crops to fill (portraits, with `focus`); fit="contain" shows the whole
+        image letterboxed (item icons, so no artwork is cropped)."""
         s = self.s
-        tile = Image.new("RGBA", (w * s, h * s), bg + (255,))
+        tw, th = max(1, int(w * s)), max(1, int(h * s))
+        tile = Image.new("RGBA", (tw, th), bg + (255,))
         im = _load(data, label)
         if im is not None:
             im = im.convert("RGBA")
             if fit == "contain":
                 shrunk = ImageOps.contain(im, tile.size, Image.LANCZOS)
-                tile.alpha_composite(shrunk, ((tile.size[0] - shrunk.width) // 2, (tile.size[1] - shrunk.height) // 2))
+                tile.alpha_composite(shrunk, ((tw - shrunk.width) // 2, (th - shrunk.height) // 2))
             else:
                 tile.alpha_composite(ImageOps.fit(im, tile.size, Image.LANCZOS, centering=focus))
-        mask = Image.new("L", tile.size, 0)
-        ImageDraw.Draw(mask).rounded_rectangle((0, 0, tile.size[0] - 1, tile.size[1] - 1), radius=r * s, fill=255)
-        self.img.paste(tile.convert("RGB"), (x * s, y * s), mask)
+        mask = Image.new("L", (tw, th), 0)
+        c = min(cut * s, tw / 2, th / 2)
+        ImageDraw.Draw(mask).polygon(
+            [(c, 0), (tw - c, 0), (tw, c), (tw, th - c), (tw - c, th), (c, th), (0, th - c), (0, c)],
+            fill=255)
+        self.img.paste(tile.convert("RGB"), (int(x * s), int(y * s)), mask)
         if im is None and label:
             words = label.split()
-            for i, line in enumerate([words[0], " ".join(words[1:])] if len(words) > 1 else [words[0]]):
+            lines = [words[0], " ".join(words[1:])] if len(words) > 1 else [words[0]]
+            for i, line in enumerate(lines):
                 if line:
-                    self.text(x + w / 2, y + h / 2 + (i - 0.5 * (len(words) > 1)) * 12,
+                    self.text(x + w / 2, y + h / 2 + (i - 0.5 * (len(lines) > 1)) * 12,
                               self.fit(line, 10, True, w - 6), 10, MUTED, True, "mm")
         if border:
-            self.rect(x, y, w, h, fill=None, r=r, outline=border, width=2)
+            pts = _chamfer(x, y, w, h, cut)
+            self.d.line(self._pts(pts) + [self._pts(pts)[0]], fill=border,
+                        width=max(1, int(round(width * s))), joint="curve")
 
-    def avatar(self, data, x, y, size):
-        """Round profile picture; grey disc with an initial-less fallback."""
-        s = self.s
-        im = _load(data)
-        disc = Image.new("RGB", (size * s, size * s), PANEL_LINE)
-        if im is not None:
-            disc = ImageOps.fit(im.convert("RGB"), (size * s, size * s), Image.LANCZOS)
-        mask = Image.new("L", disc.size, 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, disc.size[0] - 1, disc.size[1] - 1), fill=255)
-        self.img.paste(disc, (x * s, y * s), mask)
+    def avatar(self, data, x, y, size, cut=9, border=LINE_2):
+        """Chamfered square profile picture."""
+        self.icon(data, x, y, size, size, cut=cut, border=border, bg=PANEL_2, fit="cover",
+                  focus=(0.5, 0.35), width=1)
+
+    def _finish(self):
+        """Grain and vignette, applied once at 2x before the final downsample."""
+        if TEXTURE != "print" or self._finished:
+            return
+        img = self.img
+        w, h = img.size
+        noise = Image.effect_noise((w, h), 24).convert("RGB")
+        img = Image.blend(img, ImageChops.overlay(img, noise), 0.26)
+        vw, vh = 120, max(1, int(120 * h / w))
+        mask = Image.new("L", (vw, vh), 0)
+        md = ImageDraw.Draw(mask)
+        for yy in range(vh):
+            for xx in range(vw):
+                dx = (xx / max(1, vw - 1) - 0.5) * 2
+                dy = (yy / max(1, vh - 1) - 0.5) * 2
+                d = (dx * dx + dy * dy) ** 0.5
+                t = max(0.0, min(1.0, (d - 0.6) / 0.62))
+                mask.putpixel((xx, yy), int(96 * t * t))
+        mask = mask.resize((w, h), Image.BILINEAR)
+        img = Image.composite(Image.new("RGB", (w, h), (2, 4, 3)), img, mask)
+        self.img = img
+        self.d = ImageDraw.Draw(img)
+        self._finished = True
 
     def png(self) -> io.BytesIO:
+        self._finish()
         out = io.BytesIO()
         self.img.resize((self.w, self.h), Image.LANCZOS).save(out, "PNG", optimize=True)
         out.seek(0)
         return out
 
 
-def _tile(c: Canvas, x, y, w, h, label, value, color=TEXT, soul=False):
-    c.rect(x, y, w, h, PANEL, outline=PANEL_LINE)
-    c.text(x + w / 2, y + 20, label.upper(), 12, MUTED, True, "ma")
-    cy = y + h / 2 + 12
-    if soul:
-        total = 28 + 8 + c.text_w(value, 34, True)
-        sx = x + w / 2 - total / 2
-        c.soul(sx + 14, cy, 26)
-        c.text(sx + 36, cy, value, 34, color, True, "lm")
-    else:
-        c.text(x + w / 2, cy, value, 34, color, True, "mm")
-
-
+# =============================================================================
+# shared pieces
+# =============================================================================
 def _footer(c: Canvas, y: int, statlocker: bool):
     if statlocker:
-        c.text(40, y, "Powered by Statlocker (statlocker.gg)", 12, GREEN)
-    c.text(c.w - 40, y, "Match data: deadlock-api.com", 12, MUTED, False, "ra")
+        c.tracked_text(40, y, "POWERED BY STATLOCKER", 9, BRASS, True, "la", 2.0)
+    c.tracked_text(960, y, "MATCH DATA · DEADLOCK-API.COM", 9, FAINT, True, "ra", 1.5)
 
 
 def _mmss(seconds: int | None) -> str:
@@ -217,15 +616,30 @@ def _mmss(seconds: int | None) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-def _stats_panel(c: Canvas, x, y, w, h, s: MatchStats):
-    """Compact 5x2 grid of combat/farming stats plus a kill-breakdown line."""
-    c.rect(x, y, w, h, PANEL, outline=PANEL_LINE)
-    c.text(x + 24, y + 14, "MATCH STATS", 12, MUTED, True)
+def _stat_tile(c: Canvas, x, y, w, h, label, value, color=TEXT, soul=False,
+               sub=None, meter_pct=None, meter_color=None):
+    c.panel(x, y, w, h)
+    c.tracked_text(x + 16, y + 14, label.upper(), 9, MUTED, True, "la", 2.4)
+    if soul:
+        c.soul(x + 25, y + 54, 18)
+        c.text(x + 40, y + 36, value, 32, color, True)
+    else:
+        c.text(x + 16, y + 36, value, 32, color, True)
+    if meter_pct is not None:
+        c.meter(x + 16, y + h - 20, w - 32, meter_pct, meter_color or color, segments=10, h=7)
+    elif sub:
+        c.tracked_text(x + 16, y + h - 22, sub.upper(), 9, FAINT, True, "la", 1.4)
 
-    cols, pad, gap, tile_h = 5, 24, 10, 54
-    tw = (w - 2 * pad - (cols - 1) * gap) / cols
+
+def _stats_panel(c: Canvas, x, y, w, h, s: MatchStats):
+    """Compact 5x2 hairline grid of combat/farming stats plus a kill-breakdown line."""
+    c.panel(x, y, w, h)
+    c.panel_header(x + 24, y + 14, w - 48, "MATCH STATS", "END OF MATCH")
+
+    cols, pad, tile_h = 5, 24, 58
+    colw = (w - 2 * pad) / cols
     rows = [
-        [("Hero damage", _fmt(s.hero_damage, "{:,.0f}"), AMBER),
+        [("Hero damage", _fmt(s.hero_damage, "{:,.0f}"), BRASS),
          ("Damage taken", _fmt(s.damage_taken, "{:,.0f}"), RED),
          ("Healing", _fmt(s.healing, "{:,.0f}"), GREEN),
          ("Mitigated", _fmt(s.damage_mitigated, "{:,.0f}"), TEXT),
@@ -236,25 +650,31 @@ def _stats_panel(c: Canvas, x, y, w, h, s: MatchStats):
          ("Crit rate", _fmt(s.crit_rate, "{:.1f}", "%"), TEXT),
          ("Level", _fmt(s.level), TEXT)],
     ]
+    top = y + 44
     for row, tiles in enumerate(rows):
         for i, (label, value, color) in enumerate(tiles):
-            tx = x + pad + i * (tw + gap)
-            ty = y + 34 + row * (tile_h + 8)
-            c.rect(tx, ty, tw, tile_h, PANEL, outline=PANEL_LINE, r=10)
-            c.text(tx + tw / 2, ty + 13, label.upper(), 10, MUTED, True, "ma")
-            c.text(tx + tw / 2, ty + 38, value, 22, color, True, "mm")
+            tx = x + pad + i * colw
+            ty = top + row * tile_h
+            c.tracked_text(tx + 14, ty + 6, label.upper(), 8.5, MUTED, True, "la", 1.8)
+            c.text(tx + 14, ty + 20, value, 21, color, True)
+    for i in range(1, cols):
+        c.d.line(((x + pad + i * colw) * c.s, (top + 4) * c.s,
+                  (x + pad + i * colw) * c.s, (top + 2 * tile_h - 4) * c.s),
+                 fill=LINE, width=1)
+    c.divider(x + pad, top + tile_h, w - 2 * pad, LINE)
 
     parts = [f"{v} {name}" for name, v in (("bullet", s.bullet_kills), ("melee", s.melee_kills),
                                            ("ability", s.ability_kills), ("headshot", s.headshot_kills))
              if v is not None]
-    line = "Kills  " + " · ".join(parts) if parts else ""
+    line = "KILLS  " + " · ".join(parts) if parts else ""
     if s.creep_kills is not None:
         creeps = f"Creeps {s.creep_kills}" + (f"/{s.possible_creeps}" if s.possible_creeps is not None else "")
         line += ("   |   " if line else "") + creeps
     if s.neutral_kills is not None:
         line += ("   |   " if line else "") + f"Neutrals {s.neutral_kills}"
     if line:
-        c.text(x + 24, y + h - 26, line, 12, MUTED)
+        c.tracked_text(x + 24, y + h - 24, c.fit_tracked(line.upper(), 9, True, w - 48, 1.2),
+                       9, MUTED, True, "la", 1.2)
 
 
 # =============================================================================
@@ -281,59 +701,76 @@ class StatsCardData:
 
 def render_stats_card(d: StatsCardData) -> io.BytesIO:
     o = d.overall
-    c = Canvas(1000, 650)
+    c = Canvas(1000, 680)
 
-    # header
-    c.rect(40, 30, 920, 150, PANEL, outline=PANEL_LINE)
-    c.rect(40, 30, 6, 150, GREEN, r=3)
-    c.avatar(d.avatar, 74, 56, 98)
+    # header ---------------------------------------------------------------
+    hx, hy, hw, hh = 40, 28, 920, 152
+    c.panel(hx, hy, hw, hh, rail=GREEN)
+    c.sigil(884, 106, 54, EMERALD, 30)
+    c.bracket(hx + 10, hy + 10, 12, LINE_2)
+    c.bracket(hx + hw - 10, hy + hh - 10, 12, LINE_2)
+
+    c.avatar(d.avatar, 64, 52, 100)
     if d.avatar is None:
-        c.text(123, 105, (d.name[:1] or "?").upper(), 44, MUTED, True, "mm")
-    has_badge = d.rank_badge is not None
-    c.text(196, 62, c.fit(d.name, 36, True, 960 - 40 - (120 if has_badge else 0) - 196), 36, TEXT, True)
-    line2 = f"Last {o.matches} matches  |  Account {d.account_id}"
-    c.text(196, 112, line2, 15, MUTED)
+        c.text(114, 102, (d.name[:1] or "?").upper(), 44, MUTED, True, "mm", family="display")
+    if d.rank_badge:
+        c.panel(126, 114, 54, 54, fill=INK, outline=LINE_2, cut=6)
+        c.icon(d.rank_badge, 130, 118, 46, 46, cut=5, border=BRASS, bg=PANEL)
+
+    c.tracked_text(196, 56, c.fit_tracked(d.name.upper(), 36, True, 700, 1.4, "display"), 36,
+                   TEXT, True, "la", 1.4, family="display")
+    line2 = f"LAST {o.matches} MATCHES  ·  ACCOUNT {d.account_id}"
+    lw = c.tracked_text(196, 112, line2, 10, MUTED, True, "la", 1.8)
     if o.streak >= 2:  # a streak of 1 isn't worth calling out
         col = GREEN if o.streak_won else RED
-        c.pill(196 + c.text_w(line2, 15) + 14, 103, f"{'W' if o.streak_won else 'L'}{o.streak}", col)
+        c.tag(196 + lw + 12, 105, f"{'W' if o.streak_won else 'L'}{o.streak}", col, size=9)
     if d.rank_name:
-        c.text(196, 138, d.rank_name + (f"  -  PP {d.pp_score}" if d.pp_score else ""), 16, GREEN, True)
-    if has_badge:
-        c.icon(d.rank_badge, 960 - 40 - 100, 52, 100, 100, r=8, bg=PANEL)
+        rx = 196 + c.tracked_text(196, 140, d.rank_name.upper(), 13, BRASS, True, "la", 2.0) + 14
+        if d.pp_score:
+            c.tracked_text(rx, 141, f"{d.pp_score} PP", 10, MUTED, True, "la", 1.5)
 
-    # tiles
+    # headline tiles --------------------------------------------------------
+    ty, th, gap = 196, 108, 12
+    tw = (920 - 3 * gap) / 4
     wr = o.winrate
-    tiles = [("Matches", _fmt(o.matches), TEXT, False),
-             ("Win rate", _fmt(wr, "{:.1f}", "%"), TEXT if wr is None else (GREEN if wr >= 50 else RED), False),
-             ("KDA", _fmt(o.kda, "{:.2f}"), TEXT, False),
-             ("Souls / min", _fmt(o.souls_per_min, "{:,.0f}"), TEXT, True)]
-    for i, (label, value, color, soul) in enumerate(tiles):
-        _tile(c, 40 + i * 235, 200, 215, 100, label, value, color, soul)
+    wr_color = TEXT if wr is None else (GREEN if wr >= 50 else RED)
+    tiles = [
+        ("Matches", _fmt(o.matches), TEXT, False, f"{o.wins}W · {o.losses}L", None, None),
+        ("Win rate", _fmt(wr, "{:.1f}", "%"), wr_color, False, None, wr, wr_color),
+        ("KDA", _fmt(o.kda, "{:.2f}"), TEXT, False, None, None, None),
+        ("Souls / min", _fmt(o.souls_per_min, "{:,.0f}"), MINT, True, None, None, None),
+    ]
+    for i, (label, value, color, soul, sub, m_pct, m_col) in enumerate(tiles):
+        _stat_tile(c, 40 + i * (tw + gap), ty, tw, th, label, value, color, soul, sub, m_pct, m_col)
 
-    rec = f"{o.wins}W  {o.losses}L"
+    rec = f"{o.wins}W  ·  {o.losses}L"
     if o.avg_kills is not None:
-        rec += f"   |   Avg K/D/A  {o.avg_kills:.1f} / {_fmt(o.avg_deaths, '{:.1f}')} / {_fmt(o.avg_assists, '{:.1f}')}"
-    c.text(40, 316, rec, 15, MUTED)
+        rec += (f"      AVG K/D/A  {o.avg_kills:.1f} / {_fmt(o.avg_deaths, '{:.1f}')}"
+                f" / {_fmt(o.avg_assists, '{:.1f}')}")
+    c.tracked_text(40, 320, rec.upper(), 10, MUTED, True, "la", 2.0)
 
-    # most played heroes
-    c.rect(40, 346, 920, 258, PANEL, outline=PANEL_LINE)
-    c.text(64, 362, "MOST PLAYED HEROES", 12, MUTED, True)
+    # most played heroes ----------------------------------------------------
+    py, ph = 348, 268
+    c.panel(40, py, 920, ph)
+    c.panel_header(64, py + 16, 872, "MOST PLAYED HEROES", "TOP 5 · BY GAMES")
     if not d.heroes:
-        c.text(64, 440, "No hero data available.", 15, MUTED)
+        c.tracked_text(64, py + 96, "NO HERO DATA AVAILABLE", 11, MUTED, True, "la", 2.0)
+    row_h, y0 = 40, py + 46
     for i, h in enumerate(d.heroes[:5]):
-        y0 = 388 + i * 42
-        cy = y0 + 17
-        c.text(64, cy, i + 1, 15, MUTED, True, "lm")
-        c.icon(h.icon, 90, y0, 34, 34, r=8, label=h.name, focus=(0.5, 0.3))
-        c.text(142, cy, c.fit(h.name, 16, True, 250), 16, TEXT, True, "lm")
-        c.text(420, cy, f"{h.games} games", 14, MUTED, False, "lm")
+        cy = y0 + i * row_h + row_h / 2
+        c.tracked_text(64, cy, f"{i + 1:02d}", 10, FAINT, True, "lm", 1.2)
+        c.icon(h.icon, 88, cy - 16, 32, 32, cut=5, border=LINE, label=h.name, focus=(0.5, 0.3))
+        c.tracked_text(132, cy, c.fit_tracked(h.name.upper(), 14, True, 230, 1.2, "display"), 14,
+                       TEXT, True, "lm", 1.2, family="display")
+        c.tracked_text(400, cy, f"{h.games} GAMES", 9, MUTED, True, "lm", 1.6)
         wr_h = h.winrate or 0
-        c.rect(540, cy - 6, 290, 12, PANEL_LINE, r=6)
-        if wr_h > 0:
-            c.rect(540, cy - 6, max(12, int(290 * wr_h / 100)), 12, GREEN if wr_h >= 50 else RED, r=6)
-        c.text(940, cy, f"{wr_h:.0f}% WR", 14, TEXT, True, "rm")
+        c.meter(560, cy - 4, 250, wr_h, GREEN if wr_h >= 50 else RED, segments=10, h=8)
+        c.text(936, cy, f"{wr_h:.0f}%", 13, GREEN if wr_h >= 50 else RED, True, "rm")
+        if i < min(len(d.heroes), 5) - 1:
+            c.divider(64, y0 + (i + 1) * row_h, 872, LINE)
 
-    _footer(c, 620, d.statlocker)
+    c.divider(40, 632, 920, LINE, major=True)
+    _footer(c, 642, d.statlocker)
     return c.png()
 
 
@@ -364,8 +801,8 @@ class MatchCardData:
     avatar: bytes | None = None
     items: list[ItemView] = field(default_factory=list)
     unnamed_items: int = 0  # bought, but no catalogue entry to show
-    mode: str | None = None             # match-type pill, e.g. "Ranked" / "Street Brawl"
-    mode_kind: str | None = None        # ranked / brawl / bot / standard / other (pill colour)
+    mode: str | None = None             # match-type tag, e.g. "Ranked" / "Street Brawl"
+    mode_kind: str | None = None        # ranked / brawl / bot / standard / other (tag colour)
     stats: MatchStats | None = None     # end-of-match combat/farming stats
     brawl_score: tuple[int, int] | None = None  # (own, enemy) rounds won, brawl only
     brawl_round_avg_s: int | None = None
@@ -381,55 +818,65 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     items = sorted(d.items, key=lambda i: SLOT_ORDER.get(i.slot, 3))  # slot groups, purchase order inside
     shown = items[:MAX_ITEMS]
     rows = max(1, ceil(len(shown) / ITEMS_PER_ROW))
-    items_h = 44 + rows * (ITEM_CELL_H + ITEM_GAP) + 8 if shown else 84
+    items_h = 40 + rows * (ITEM_CELL_H + ITEM_GAP) + 12 if shown else 92
     has_lobby = bool(d.own_lobby_rank or d.enemy_lobby_rank)
-    y_stats = 340
-    y_items = y_stats + (STATS_PANEL_H + 12 if d.stats else 0)
+    color = GREEN if d.won is True else RED if d.won is False else BRASS
+
+    y_kda, kda_h = 192, 150
+    y_items = (y_kda + kda_h) + 14 + (STATS_PANEL_H + 14 if d.stats else 0)
     y_end = y_items + items_h
-    c = Canvas(1000, y_end + (44 if has_lobby else 20) + 30)
-    color = GREEN if d.won is True else RED if d.won is False else AMBER
+    y = y_end + 18 + (26 if has_lobby else 0)
+    c = Canvas(1000, y + 48)
 
-    # banner: hero portrait + result
-    c.rect(40, 30, 920, 130, PANEL, outline=PANEL_LINE)
-    c.rect(40, 30, 6, 130, color, r=3)
-    c.icon(d.hero_icon, 68, 45, 100, 100, r=14, border=color, label=d.hero, focus=(0.5, 0.3))
-    c.text(194, 40, "VICTORY" if d.won is True else "DEFEAT" if d.won is False else "MATCH", 40, color, True)
-    c.text(194, 90, c.fit(d.hero, 22, True, 400), 22, TEXT, True)
-    info = f"Match #{d.match_id}"
-    c.text(194, 122, info, 14, MUTED)
-    x = 194 + c.text_w(info, 14) + 10
+    # banner: watermark + sigil + portrait + result ------------------------
+    c.panel(40, 28, 920, 152, rail=color)
+    c.watermark(d.hero_icon, 42, 30, 916, 148, alpha=0.34)
+    c.sigil(878, 108, 60, BRASS, 36)
+    c.bracket(50, 38, 12, LINE_2)
+    c.bracket(950, 170, 12, LINE_2)
+    c.icon(d.hero_icon, 64, 46, 116, 116, cut=10, border=color, label=d.hero, focus=(0.5, 0.3),
+           bg=PANEL_2)
+
+    result = "VICTORY" if d.won is True else "DEFEAT" if d.won is False else "MATCH"
+    c.tracked_text(200, 44, result, 44, color, True, "la", 3.0, family="display")
+    c.tracked_text(200, 98, c.fit_tracked(d.hero.upper(), 21, True, 330, 1.4, "display"), 21,
+                   TEXT, True, "la", 1.4, family="display")
+
+    x = 200
+    x += c.tracked_text(x, 132, f"MATCH #{d.match_id}", 9.5, MUTED, True, "la", 1.8) + 14
     if d.mode:
-        x += c.pill(x, 115, d.mode, MODE_COLORS.get(d.mode_kind or "", MUTED)) + 10
+        x += c.tag(x, 124, d.mode.upper(), MODE_COLORS.get(d.mode_kind or "", MUTED), size=9) + 8
     if d.rank_name:
-        rank_txt = d.rank_name + (f"  · {d.pp_score} PP" if d.pp_score is not None else "")
-        c.text(x, 122, rank_txt, 14, MUTED, True)
-        x += c.text_w(rank_txt, 14, True) + 8
-        if d.pp_delta:
-            up, col = d.pp_delta > 0, GREEN if d.pp_delta > 0 else RED
-            c.tri(x + 5, 119, 9, up, col)
-            c.text(x + 14, 122, f"{'+' if up else ''}{d.pp_delta}", 13, col, True)
-    right = 960 - 28
-    if d.avatar:
-        c.avatar(d.avatar, 960 - 28 - 64, 48, 64)
-        right -= 64 + 16
-    c.text(right, 52, c.fit(d.name, 22, True, 330), 22, TEXT, True, "ra")
-    if d.start_time:
-        c.text(right, 88, datetime.fromtimestamp(d.start_time, timezone.utc).strftime("%d %b %Y, %H:%M UTC"),
-               14, MUTED, False, "ra")
-    if d.duration_s:
-        m, s = divmod(d.duration_s, 60)
-        c.text(right, 108, f"Duration {m}:{s:02d}", 14, MUTED, False, "ra")
+        rank_txt = d.rank_name.upper() + (f" · {d.pp_score} PP" if d.pp_score is not None else "")
+        x += c.tag(x, 124, rank_txt, BRASS, size=9) + 8
+    if d.pp_delta:
+        up, col = d.pp_delta > 0, GREEN if d.pp_delta > 0 else RED
+        c.tri(x + 6, 130, 9, up, col)
+        c.text(x + 15, 132, f"{'+' if up else ''}{d.pp_delta}", 11, col, True)
 
-    # K / D / A and souls
-    c.rect(40, 180, 920, 140, PANEL, outline=PANEL_LINE)
+    right = 860 if d.avatar else 936
+    if d.avatar:
+        c.avatar(d.avatar, 936 - 56, 46, 56)
+    c.tracked_text(right, 46, c.fit_tracked(d.name.upper(), 17, True, 290, 1.2, "display"), 17,
+                   TEXT, True, "ra", 1.2, family="display")
+    if d.start_time:
+        c.tracked_text(right, 78, datetime.fromtimestamp(d.start_time, timezone.utc)
+                       .strftime("%d %b %Y · %H:%M UTC").upper(), 9, MUTED, True, "ra", 1.4)
+    if d.duration_s:
+        c.tracked_text(right, 96, f"DURATION {_mmss(d.duration_s)}", 9, MUTED, True, "ra", 1.4)
+
+    # K / D / A + economy ---------------------------------------------------
+    c.panel(40, y_kda, 920, kda_h)
     for i, (label, val, col) in enumerate([("Kills", d.kills, GREEN), ("Deaths", d.deaths, RED),
                                            ("Assists", d.assists, TEXT)]):
-        cx = 40 + 520 * (i * 2 + 1) / 6
-        c.text(cx, 198, label.upper(), 12, MUTED, True, "ma")
-        c.text(cx, 248, _fmt(val), 60, col, True, "mm")
+        cx = 40 + 540 * (i * 2 + 1) / 6
+        c.tracked_text(cx, 212, label.upper(), 9, MUTED, True, "ma", 3.0)
+        c.text(cx, 244, _fmt(val), 58, col, True, "ma")
     if None not in (d.kills, d.deaths, d.assists):
-        c.text(300, 298, f"KDA {(d.kills + d.assists) / max(d.deaths, 1):.2f}", 14, MUTED, True, "mm")
-    c.d.line((580 * 2, 200 * 2, 580 * 2, 300 * 2), fill=PANEL_LINE, width=2)
+        c.tracked_text(310, 322, f"KDA {(d.kills + d.assists) / max(d.deaths, 1):.2f}", 9.5, MUTED,
+                       True, "ma", 2.0)
+    c.d.line((580 * c.s, 212 * c.s, 580 * c.s, 324 * c.s), fill=LINE, width=1)
+
     if d.brawl_score is not None:
         # Street Brawl has no soul economy: round results are the useful numbers there.
         own, enemy = d.brawl_score
@@ -442,44 +889,53 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
                        ("Souls / min", _fmt(spm, "{:,.0f}"), True),
                        ("Last hits", _fmt(d.last_hits), False), ("Denies", _fmt(d.denies), False)]
     for (label, value, soul), (x, y) in zip(right_tiles,
-                                            [(612, 198), (790, 198), (612, 254), (790, 254)]):
-        c.text(x, y, label.upper(), 11, MUTED, True)
+                                            [(612, 212), (792, 212), (612, 274), (792, 274)]):
+        c.tracked_text(x, y, label.upper(), 8.5, MUTED, True, "la", 1.8)
         if soul:
-            c.soul(x + 11, y + 30, 22)
-        c.text(x + (30 if soul else 0), y + 16, value, 28, TEXT, True)
+            c.soul(x + 10, y + 30, 17)
+        c.text(x + (24 if soul else 0), y + 14, value, 25, TEXT, True)
 
     if d.stats:
-        _stats_panel(c, 40, y_stats, 920, STATS_PANEL_H, d.stats)
+        _stats_panel(c, 40, y_kda + kda_h + 14, 920, STATS_PANEL_H, d.stats)
 
-    # items bought
-    c.rect(40, y_items, 920, items_h, PANEL, outline=PANEL_LINE)
-    c.text(64, y_items + 16, "ITEMS BOUGHT", 12, MUTED, True)
-    count = f"{len(items) + d.unnamed_items} items" + (f"  ({d.unnamed_items} not in catalogue)" if d.unnamed_items else "")
-    c.text(936, y_items + 16, count, 12, MUTED, False, "ra")
+    # items bought ----------------------------------------------------------
+    c.panel(40, y_items, 920, items_h)
+    count = f"{len(items) + d.unnamed_items} ITEMS"
+    if d.unnamed_items:
+        count += f" · {d.unnamed_items} UNLISTED"
+    c.panel_header(64, y_items + 16, 872, "ITEMS BOUGHT", count)
     if not shown:
         msg = "Item data isn't available for this match yet." if not d.unnamed_items else \
             f"{d.unnamed_items} items bought, but their names/icons couldn't be loaded."
-        c.text(64, y_items + 52, msg, 15, MUTED)
+        c.text(64, y_items + 52, msg, 13, MUTED)
     grid_w = ITEMS_PER_ROW * ITEM_SIZE + (ITEMS_PER_ROW - 1) * ITEM_GAP
     for i, it in enumerate(shown):
         x = 40 + (920 - grid_w) // 2 + (i % ITEMS_PER_ROW) * (ITEM_SIZE + ITEM_GAP)
-        y = y_items + 40 + (i // ITEMS_PER_ROW) * (ITEM_CELL_H + ITEM_GAP)
-        col = SLOT_COLORS.get(it.slot, (90, 100, 110))
-        c.icon(it.icon, x, y, ITEM_SIZE, ITEM_SIZE, r=10, border=col, label=it.name, fit="contain")
+        y = y_items + 46 + (i // ITEMS_PER_ROW) * (ITEM_CELL_H + ITEM_GAP)
+        col = SLOT_COLORS.get(it.slot, MUTED)
+        c.icon(it.icon, x, y, ITEM_SIZE, ITEM_SIZE, cut=6, border=col, label=it.name, fit="contain",
+               width=1.5)
         if it.tier in ROMAN:
-            c.rect(x + ITEM_SIZE - 22, y + ITEM_SIZE - 16, 20, 14, BG, r=5)
-            c.text(x + ITEM_SIZE - 12, y + ITEM_SIZE - 9, ROMAN[it.tier], 10, col, True, "mm")
-        c.text(x + ITEM_SIZE / 2, y + ITEM_SIZE + 2, c.fit(it.name, 10, False, ITEM_SIZE + ITEM_GAP - 4),
-               10, MUTED, False, "ma")
+            c.panel(x + ITEM_SIZE - 25, y + ITEM_SIZE - 19, 21, 15, fill=INK, outline=col, cut=3,
+                    width=1)
+            c.text(x + ITEM_SIZE - 14.5, y + ITEM_SIZE - 11.5, ROMAN[it.tier], 9, col, True, "mm")
+        c.text(x + ITEM_SIZE / 2, y + ITEM_SIZE + 2,
+               c.fit(it.name, 9, False, ITEM_SIZE + ITEM_GAP - 4, family="body"), 9, MUTED, False,
+               "ma", family="body")
     if len(items) > MAX_ITEMS:
-        c.text(936, y_items + items_h - 14, f"+{len(items) - MAX_ITEMS} more", 12, MUTED, False, "rm")
+        c.tracked_text(936, y_items + items_h - 16, f"+{len(items) - MAX_ITEMS} MORE", 9, MUTED,
+                       True, "ra", 1.4)
 
-    y = y_end + 14
+    # lobby + footer --------------------------------------------------------
+    y = y_end + 18
     if has_lobby:
-        c.text(40, y, f"Lobby average rank   Your team: {d.own_lobby_rank or '-'}"
-                      f"   |   Enemy team: {d.enemy_lobby_rank or '-'}", 14, MUTED)
+        c.tracked_text(40, y, "LOBBY AVERAGE RANK", 9, FAINT, True, "la", 2.0)
+        lx = 40 + c.tracked_w("LOBBY AVERAGE RANK", 9, True, 2.0) + 18
+        lx += c.tag(lx, y - 5, f"YOUR TEAM · {d.own_lobby_rank or '-'}", GREEN, size=9) + 10
+        c.tag(lx, y - 5, f"ENEMY TEAM · {d.enemy_lobby_rank or '-'}", RED, size=9)
         y += 26
-    _footer(c, y + 6, d.statlocker)
+    c.divider(40, y + 6, 920, LINE, major=True)
+    _footer(c, y + 14, d.statlocker)
     return c.png()
 
 
@@ -508,56 +964,67 @@ class MatchesCardData:
     statlocker: bool = False
 
 
-ROW_H = 60
+ROW_H = 64
 
 
 def render_matches_card(d: MatchesCardData) -> io.BytesIO:
     rows = d.matches
-    body_h = max(1, len(rows)) * ROW_H + 16
-    c = Canvas(1000, 120 + body_h + 56)
+    body_h = max(1, len(rows)) * ROW_H + 12
+    y0 = 124
+    c = Canvas(1000, y0 + body_h + 60)
 
-    # header
-    c.rect(40, 30, 920, 76, PANEL, outline=PANEL_LINE)
-    c.avatar(d.avatar, 56, 44, 48)
+    # header ---------------------------------------------------------------
+    c.panel(40, 28, 920, 84, rail=GREEN)
+    c.bracket(50, 38, 12, LINE_2)
+    c.bracket(950, 102, 12, LINE_2)
+    c.avatar(d.avatar, 56, 46, 48)
     if d.avatar is None:
-        c.text(80, 68, (d.name[:1] or "?").upper(), 20, MUTED, True, "mm")
-    c.text(120, 50, c.fit(d.name, 24, True, 600), 24, TEXT, True)
-    c.text(120, 80, f"Last {len(rows)} matches  |  Account {d.account_id}", 14, MUTED)
+        c.text(80, 70, (d.name[:1] or "?").upper(), 20, MUTED, True, "mm", family="display")
+    c.tracked_text(120, 46, c.fit_tracked(d.name.upper(), 22, True, 560, 1.2, "display"), 22,
+                   TEXT, True, "la", 1.2, family="display")
+    c.tracked_text(120, 74, c.fit_tracked(f"LAST {len(rows)} MATCHES  ·  ACCOUNT {d.account_id}",
+                                          9, True, 620, 1.6), 9, MUTED, True, "la", 1.6)
     wins = sum(1 for r in rows if r.won is True)
     losses = sum(1 for r in rows if r.won is False)
-    c.text(940, 68, f"{wins}W  {losses}L", 16, TEXT, True, "rm")
+    lw = c.tracked_w(f"{losses}L", 16, True, 1.5)
+    c.tracked_text(936, 60, f"{losses}L", 16, RED, True, "ra", 1.5)
+    c.tracked_text(936 - lw - 16, 60, f"{wins}W", 16, GREEN, True, "ra", 1.5)
 
-    # rows
-    y0 = 124
-    c.rect(40, y0, 920, body_h, PANEL, outline=PANEL_LINE)
+    # rows -----------------------------------------------------------------
+    c.panel(40, y0, 920, body_h)
     if not rows:
-        c.text(500, y0 + body_h / 2, "No recent matches found.", 15, MUTED, False, "mm")
+        c.tracked_text(500, y0 + body_h / 2, "NO RECENT MATCHES FOUND", 11, MUTED, True, "mm", 2.0)
     for i, r in enumerate(rows):
-        y = y0 + 8 + i * ROW_H
-        color = GREEN if r.won is True else RED if r.won is False else AMBER
-        c.rect(40, y, 6, ROW_H - 6, color, r=3)
-        c.icon(r.hero_icon, 58, y + 3, ROW_H - 12, ROW_H - 12, r=10, label=r.hero, focus=(0.5, 0.3))
-        cy = y + (ROW_H - 6) / 2
-        c.text(58 + ROW_H - 2, cy, "WIN" if r.won is True else "LOSS" if r.won is False else "—",
-               12, color, True, "lm")
-        c.text(58 + ROW_H - 2, cy + 18, c.fit(r.hero, 16, True, 220), 16, TEXT, True, "lm")
+        y = y0 + 6 + i * ROW_H
+        cy = y + ROW_H / 2
+        color = GREEN if r.won is True else RED if r.won is False else BRASS
+        if i % 2 == 1:
+            c.d.rectangle((41 * c.s, y * c.s, 959 * c.s, (y + ROW_H) * c.s),
+                          fill=_mix(PANEL, PANEL_2, 0.6))
+        c.d.rectangle((42 * c.s, (y + 9) * c.s, 45 * c.s, (y + ROW_H - 9) * c.s), fill=color)
+        c.icon(r.hero_icon, 58, y + 12, 40, 40, cut=6, border=color, label=r.hero,
+               focus=(0.5, 0.3), width=1)
+        c.tracked_text(112, cy - 9, "WIN" if r.won is True else "LOSS" if r.won is False else "—",
+                       9, color, True, "lm", 2.4)
+        c.tracked_text(112, cy + 5, c.fit_tracked(r.hero.upper(), 15, True, 160, 1.0, "display"),
+                       15, TEXT, True, "lm", 1.0, family="display")
         if r.mode:
-            c.pill(336, cy - 11, r.mode, MODE_COLORS.get(r.mode_kind or "", MUTED), size=11)
+            c.tag(292, cy - 9, r.mode.upper(), MODE_COLORS.get(r.mode_kind or "", MUTED), size=9)
         if None not in (r.kills, r.deaths, r.assists):
-            kda = f"{r.kills} / {r.deaths} / {r.assists}"
-            c.text(560, cy, kda, 16, TEXT, True, "lm")
+            c.text(540, cy, f"{r.kills} / {r.deaths} / {r.assists}", 16, TEXT, True, "lm")
             ratio = (r.kills + r.assists) / max(r.deaths, 1)
-            c.text(560, cy + 18, f"KDA {ratio:.2f}", 12, MUTED, False, "lm")
+            c.tag(660, cy - 9, f"KDA {ratio:.2f}", MUTED, size=9)
         if r.duration_s:
-            m, s = divmod(r.duration_s, 60)
-            c.text(760, cy, f"{m}:{s:02d}", 14, MUTED, False, "lm")
+            c.tracked_text(770, cy, _mmss(r.duration_s), 12, MUTED, True, "lm", 1.2)
         if r.start_time:
-            c.text(940, cy + 9, datetime.fromtimestamp(r.start_time, timezone.utc).strftime("%d %b, %H:%M"),
-                   13, MUTED, False, "rm")
+            c.tracked_text(936, cy + 3, datetime.fromtimestamp(r.start_time, timezone.utc)
+                           .strftime("%d %b · %H:%M").upper(), 9, MUTED, True, "rm", 1.2)
         if r.match_id:
-            c.text(940, cy - 9, f"#{r.match_id}", 12, MUTED, False, "rm")
+            c.tracked_text(936, cy - 11, f"#{r.match_id}", 9, FAINT, True, "rm", 1.0)
         if i < len(rows) - 1:
-            c.d.line((40 * c.s, (y + ROW_H) * c.s, 960 * c.s, (y + ROW_H) * c.s), fill=PANEL_LINE, width=1)
+            c.divider(58, y + ROW_H, 878, LINE)
 
-    _footer(c, y0 + body_h + 24, d.statlocker)
+    y = y0 + body_h + 14
+    c.divider(40, y, 920, LINE, major=True)
+    _footer(c, y + 8, d.statlocker)
     return c.png()

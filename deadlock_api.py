@@ -1,7 +1,7 @@
 """Client for the community Deadlock API (https://api.deadlock-api.com).
 
 Used for what Statlocker's API does not offer: match lists, per-match items, the
-hero/item catalogue with image URLs and Steam personas/avatars.
+hero/item catalogue with image URLs, Steam personas/avatars and match ingest status.
 """
 import asyncio
 import logging
@@ -9,9 +9,9 @@ import time
 
 import aiohttp
 
-from models import (HERO_IMAGE_KEYS, ITEM_IMAGE_KEYS, Asset, Match,
-                    SteamProfile, normalize_entry, normalize_metadata, parse_assets,
-                    parse_steam_profile)
+from models import (HERO_IMAGE_KEYS, ITEM_IMAGE_KEYS, Asset, Match, MatchInfo, Salts,
+                    SteamProfile, _int, normalize_entry, normalize_metadata, parse_assets,
+                    parse_match_info, parse_salts, parse_steam_profile)
 
 log = logging.getLogger("deadlock_api")
 
@@ -19,6 +19,8 @@ BASE = "https://api.deadlock-api.com"
 ASSET_TTL = 6 * 3600
 STEAM_TTL = 6 * 3600          # persona + avatar rarely change; the response carries a friends list
 STEAM_MISS_TTL = 600          # do not hammer a private/failed profile
+INFO_TTL = 30                 # /v1/matches/metadata allows only 30 req/min per IP
+RECENT_TTL = 60               # the recently-fetched feed is ~1 MB
 
 
 class ApiUnavailable(Exception):
@@ -31,6 +33,8 @@ class DeadlockAPI:
         self.headers = {"X-API-KEY": api_key} if api_key else {}
         self._assets: dict[str, tuple[float, dict[int, Asset]]] = {}
         self._steam: dict[int, tuple[float, SteamProfile | None]] = {}
+        self._info: dict[int, tuple[float, int | None, MatchInfo | None]] = {}
+        self._recent: tuple[float, set[int]] | None = None
 
     async def _request(self, url: str, params: dict | None = None, retries: int = 2,
                        critical: bool = False) -> tuple[int | None, object | None]:
@@ -113,3 +117,46 @@ class DeadlockAPI:
         profile = parse_steam_profile(data) if status == 200 else None
         self._steam[account_id] = (now, profile)
         return profile
+
+    # --- ingest status (/matchstatus) --------------------------------------
+    async def match_info(self, match_id: int) -> tuple[int | None, MatchInfo | None]:
+        """Cheap existence check: a match_info row means the match is ingested.
+        Returns (status, row); 404 means not ingested, None means unreachable."""
+        now = time.monotonic()
+        hit = self._info.get(match_id)
+        if hit and now - hit[0] < INFO_TTL:
+            return hit[1], hit[2]
+        status, data = await self._request(f"{BASE}/v1/matches/metadata",
+                                           {"match_ids": match_id, "include_info": "true", "limit": 1})
+        info = parse_match_info(data) if status == 200 else None
+        self._info[match_id] = (now, status, info)
+        return status, info
+
+    async def metadata_available(self, match_id: int) -> bool | None:
+        """Whether the full metadata (items/stats) is cached. disable_steam keeps this
+        fast and avoids the 3-req/h Steam fallback budget. None = could not tell
+        (unreachable, or a transient error such as a 429 that is not "not ingested")."""
+        status, _ = await self._request(f"{BASE}/v1/matches/{match_id}/metadata",
+                                        {"disable_steam": "true"}, retries=1)
+        if status is None or status not in (200, 404):
+            return None
+        return status == 200
+
+    async def match_salts(self, match_id: int) -> tuple[int | None, Salts | None]:
+        """Salts stored for this match = the API knows it. Same disable_steam rule."""
+        status, data = await self._request(f"{BASE}/v1/matches/{match_id}/salts",
+                                           {"disable_steam": "true"}, retries=1)
+        return status, parse_salts(data) if status == 200 else None
+
+    async def recently_fetched_ids(self) -> set[int] | None:
+        """Matches fetched in the last 10 minutes (~1 MB), cached briefly."""
+        now = time.monotonic()
+        if self._recent and now - self._recent[0] < RECENT_TTL:
+            return self._recent[1]
+        status, data = await self._request(f"{BASE}/v1/matches/recently-fetched", retries=1)
+        if status != 200 or not isinstance(data, list):
+            return None
+        ids = {i for i in (_int(row.get("match_id")) for row in data if isinstance(row, dict))
+               if i is not None}
+        self._recent = (now, ids)
+        return ids

@@ -397,3 +397,91 @@ def resolve_identity(statlocker, steam: SteamProfile | None, fallback_name: str 
     avatar = (steam.avatar_url if steam else None) or \
         (getattr(statlocker, "avatar_url", None) if statlocker else None)
     return Identity(str(name), avatar or None)
+
+
+# --- match ingest status (/matchstatus) ------------------------------------
+@dataclass(frozen=True)
+class Salts:
+    match_id: int | None
+    metadata_salt: int | None = None
+    replay_salt: int | None = None
+    metadata_url: str | None = None
+    demo_url: str | None = None
+
+    @property
+    def has_demo(self) -> bool:
+        return bool(self.demo_url)
+
+
+def parse_salts(data) -> Salts | None:
+    if not isinstance(data, dict):
+        return None
+    if not any(k in data for k in ("metadata_salt", "replay_salt", "metadata_url", "demo_url")):
+        return None
+    return Salts(_int(_pick(data, "match_id")), _int(_pick(data, "metadata_salt")),
+                 _int(_pick(data, "replay_salt")), _str(_pick(data, "metadata_url")),
+                 _str(_pick(data, "demo_url")))
+
+
+@dataclass(frozen=True)
+class MatchInfo:
+    match_id: int
+    start_time: str | None = None  # "YYYY-MM-DD HH:MM:SS" (UTC)
+    duration_s: int | None = None
+    match_mode: str | None = None
+    game_mode: str | None = None
+    winning_team: str | None = None
+
+    @property
+    def mode_label(self) -> str:
+        if (self.game_mode or "").lower() in ("streetbrawl", "street_brawl"):
+            return "Street Brawl"
+        return self.match_mode or self.game_mode or "Unknown"
+
+
+def parse_match_info(data) -> MatchInfo | None:
+    """Row from /v1/matches/metadata?include_info=true (a list, or a single object)."""
+    row = next((x for x in data if isinstance(x, dict)), None) if isinstance(data, list) else \
+        (data if isinstance(data, dict) else None)
+    if not isinstance(row, dict):
+        return None
+    match_id = _int(_pick(row, "match_id"))
+    if match_id is None:
+        return None
+    return MatchInfo(match_id, _str(_pick(row, "start_time")), _int(_pick(row, "duration_s")),
+                     _str(_pick(row, "match_mode")), _str(_pick(row, "game_mode")),
+                     _str(_pick(row, "winning_team")))
+
+
+@dataclass(frozen=True)
+class IngestVerdict:
+    kind: str  # full / partial / queued / processing / missing / unreachable
+    emoji: str
+    title: str
+    detail: str
+
+
+def ingest_verdict(info_status: int | None, metadata_ok: bool | None,
+                   salts_status: int | None, recent: bool | None) -> IngestVerdict:
+    """Map the public ingest signals to one verdict. Status is the HTTP code, or None
+    when the API could not be reached. `recent` is the last-10-minutes feed (None = not checked)."""
+    if info_status == 200:
+        if metadata_ok:
+            return IngestVerdict("full", "✅", "Ingested",
+                                 "Scoreboard and item/stats metadata are available.")
+        if metadata_ok is False:
+            return IngestVerdict("partial", "🟡", "Partially ingested",
+                                 "Scoreboard is in, but item/stats metadata is still pending.")
+        return IngestVerdict("full", "✅", "Ingested (scoreboard)",
+                             "Scoreboard is in; item/stats metadata could not be checked.")
+    if salts_status == 200:
+        return IngestVerdict("queued", "🟡", "Queued",
+                             "The API knows this match (salts stored) but has not ingested it yet.")
+    if info_status is None or salts_status is None:
+        return IngestVerdict("unreachable", "⚠️", "API unreachable",
+                             "Could not reach api.deadlock-api.com; try again in a minute.")
+    if recent:
+        return IngestVerdict("processing", "🟡", "Processing",
+                             "Fetched within the last 10 minutes; ingestion is still in progress.")
+    return IngestVerdict("missing", "❌", "Not ingested",
+                         "No scoreboard, salts, or recent fetch for this match id.")

@@ -12,8 +12,9 @@ except ImportError:
 from db import DB
 from local_icons import LocalIcons, norm
 from models import (BrawlRound, ItemBuy, Match, MatchStats, SteamProfile, final_items,
-                    match_type, merge_match, normalize_entry, normalize_metadata,
-                    parse_assets, parse_steam_profile, pick_image, resolve_identity)
+                    ingest_verdict, match_type, merge_match, normalize_entry, normalize_metadata,
+                    parse_assets, parse_match_info, parse_salts, parse_steam_profile, pick_image,
+                    resolve_identity)
 from statlocker import parse_lobby, parse_profile, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import account_to_steam64, parse_steam_input
@@ -142,6 +143,39 @@ class SteamIdentity(unittest.TestCase):
         for args, want in cases:
             i = resolve_identity(*args, 7)
             self.assertEqual((i.name, i.avatar_url), want, args)
+
+
+class IngestStatus(unittest.TestCase):
+    def test_parse_salts(self):
+        s = parse_salts({"match_id": 5, "metadata_salt": 1, "replay_salt": None,
+                         "metadata_url": "m", "demo_url": None})
+        self.assertEqual((s.match_id, s.metadata_salt, s.replay_salt, s.has_demo), (5, 1, None, False))
+        self.assertTrue(parse_salts({"metadata_salt": 1, "demo_url": "d"}).has_demo)
+        for bad in (None, [], {}, "x", {"match_id": 1}):
+            self.assertIsNone(parse_salts(bad), bad)
+
+    def test_parse_match_info(self):
+        row = {"match_id": 135405866, "start_time": "2026-11-11 09:21:25", "winning_team": "Team1",
+               "duration_s": 934, "match_mode": "Unranked", "game_mode": "StreetBrawl"}
+        i = parse_match_info([row])
+        self.assertEqual((i.match_id, i.duration_s, i.mode_label), (135405866, 934, "Street Brawl"))
+        self.assertEqual(parse_match_info({"match_id": 1, "match_mode": "Ranked"}).mode_label, "Ranked")
+        self.assertIsNone(parse_match_info({"match_id": None}))
+        self.assertIsNone(parse_match_info([]))
+
+    def test_verdicts(self):
+        cases = [
+            ((200, True, 200, None), "full"),
+            ((200, False, 200, None), "partial"),
+            ((200, None, 200, None), "full"),
+            ((404, None, 200, None), "queued"),
+            ((404, None, 404, True), "processing"),
+            ((404, None, 404, False), "missing"),
+            ((None, None, None, None), "unreachable"),
+            ((404, None, None, None), "unreachable"),
+        ]
+        for args, kind in cases:
+            self.assertEqual(ingest_verdict(*args).kind, kind, args)
 
 
 class LocalIconFiles(unittest.TestCase):

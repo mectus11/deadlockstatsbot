@@ -11,6 +11,7 @@ Posts a stats card after every Deadlock match you play, plus on-demand cards.
 | `/stats [steamid]` | Overall card: matches, win rate, KDA, souls/min, top heroes with portraits, rank. |
 | `/matches [steamid] [count]` | Compact list of recent matches: result, hero, mode, KDA (default 10). |
 | `/latestmatch [steamid]` | Match card: hero portrait, result, match type (ranked/standard/bot/Street Brawl), K/D/A, combat stats, souls, and every item bought with its icon. |
+| `/matchstatus [match_id]` | Checks whether the Deadlock API has ingested a match: scoreboard, item/stats metadata, stored salts, or still queued. Defaults to your latest match. |
 
 `steamid` can be a SteamID64 (17 digits), a 32-bit account ID, or a `steamcommunity.com/profiles/...` link
 (custom `/id/name` links can't be resolved). Leave it empty to use your saved account. `name` is optional and

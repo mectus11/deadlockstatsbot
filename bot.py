@@ -8,6 +8,7 @@ Commands
   /stats [steamid]         overall stats card (defaults to your saved account)
   /latestmatch [steamid]   latest match card (defaults to your saved account)
   /matches [steamid] [count]  compact list of recent matches: result, hero, mode, KDA (default 10)
+  /matchstatus [match_id]  check whether the Deadlock API has ingested a match (or it is queued)
 """
 import asyncio
 import logging
@@ -25,7 +26,7 @@ from db import DB
 from deadlock_api import ApiUnavailable, DeadlockAPI
 from images import ImageStore
 from local_icons import LocalIcons
-from models import Match, match_type, merge_match, resolve_identity
+from models import Match, ingest_verdict, match_type, merge_match, resolve_identity
 from statlocker import StatlockerAPI, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import STEAM_INPUT_HELP, parse_steam_input
@@ -396,6 +397,91 @@ async def latestmatch(interaction: discord.Interaction, steamid: str | None = No
     track = (interaction.user.id, interaction.guild_id) if steamid is None else None  # never track on someone else's card
     png = await bot.render_match(acc, await bot.load_match(acc, history[0]), fallback_name=name, track=track)
     await interaction.followup.send(file=discord.File(png, filename="latest_match.png"))
+
+
+_VERDICT_COLOURS = {"full": 0x3FB950, "partial": 0xD29922, "queued": 0xD29922,
+                    "processing": 0xD29922, "missing": 0xF85149, "unreachable": 0x8B949E}
+
+
+def _fmt_duration(seconds: int | None) -> str | None:
+    if not seconds:
+        return None
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
+
+
+def _status_label(status: int | None, ok: str, missing: str) -> str:
+    if status == 200:
+        return f"✅ {ok}"
+    if status == 404:
+        return f"❌ {missing}"
+    if status is None:
+        return "⚠️ unreachable"
+    return f"⚠️ HTTP {status}"
+
+
+@bot.tree.command(name="matchstatus", description="Check if the Deadlock API has ingested a match (or if it is queued)")
+@app_commands.describe(match_id="Match ID (leave empty to check your latest match)")
+async def matchstatus(interaction: discord.Interaction, match_id: int | None = None):
+    await interaction.response.defer(ephemeral=True)
+    link = bot.db.get_link(interaction.user.id, interaction.guild_id or 0)
+    if match_id is None:
+        if link is None:
+            return await interaction.followup.send(
+                "Give me a match ID (`/matchstatus match_id:...`) or run `/save` first.")
+        history = await bot.dl.match_history(link.account_id)
+        if not history:
+            return await interaction.followup.send("No matches found for your saved account.")
+        match_id = history[0].match_id
+
+    info_status, info = await bot.dl.match_info(match_id)
+    salts_status, salts = await bot.dl.match_salts(match_id)
+    metadata_ok = await bot.dl.metadata_available(match_id) if info_status == 200 else None
+    recent = None
+    if info_status != 200 and salts_status != 200:  # only the "unknown" branch needs the 1 MB feed
+        ids = await bot.dl.recently_fetched_ids()
+        recent = (match_id in ids) if ids is not None else None
+
+    verdict = ingest_verdict(info_status, metadata_ok, salts_status, recent)
+    embed = discord.Embed(title=f"Match {match_id} — {verdict.emoji} {verdict.title}",
+                          description=verdict.detail,
+                          colour=_VERDICT_COLOURS.get(verdict.kind, 0x8B949E))
+    if info:
+        bits = [info.mode_label]
+        if duration := _fmt_duration(info.duration_s):
+            bits.append(duration)
+        if info.start_time:
+            bits.append(f"started {info.start_time} UTC")
+        embed.add_field(name="Match", value=" · ".join(bits), inline=False)
+    embed.add_field(name="Scoreboard", value=_status_label(info_status, "ingested", "not found"), inline=True)
+    embed.add_field(name="Item/stats metadata",
+                    value={True: "✅ available", False: "🟡 pending", None: "— unknown"}[metadata_ok],
+                    inline=True)
+    salts_text = _status_label(salts_status, "stored", "none")
+    if salts and salts.has_demo:
+        salts_text += " · demo replay"
+    embed.add_field(name="Salts", value=salts_text, inline=True)
+    if recent is not None:
+        embed.add_field(name="Recently fetched", value="✅ yes (last 10 min)" if recent else "❌ no",
+                        inline=True)
+    if link:
+        if not link.last_match_id:
+            state = "nothing posted yet"
+        elif match_id > link.last_match_id:
+            state = "newer than your last posted match"
+        elif match_id == link.last_match_id:
+            state = "your last posted match"
+        else:
+            state = "already covered"
+        embed.add_field(name="Your account",
+                        value=f"last posted `{link.last_match_id}` — {state}", inline=False)
+        waited = bot.waits.get((link.discord_id, link.guild_id, match_id), 0)
+        if waited:
+            embed.add_field(name="Bot retry",
+                            value=f"waiting for item data (attempt {waited}/{MAX_WAIT_FOR_ITEMS})",
+                            inline=False)
+    embed.set_footer(text=f"checked {discord.utils.utcnow():%Y-%m-%d %H:%M:%S} UTC")
+    await interaction.followup.send(embed=embed)
 
 
 def main():

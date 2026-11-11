@@ -272,13 +272,22 @@ bot = StatsBot()
 @bot.tree.error
 async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     original = getattr(error, "original", error)
-    if isinstance(original, ApiUnavailable):
+    ephemeral = False
+    if isinstance(original, app_commands.TransformerError):
+        # Raised before the callback runs, e.g. /setchannel channel:deadlock typed by hand
+        command = interaction.command.name if interaction.command else "this command"
+        log.warning("could not convert option value %r for /%s", original.value, command)
+        msg = ("I couldn't read that channel. Pick one from Discord's channel list, or leave the option "
+               "empty to use the current channel. For a private channel, give the bot **View Channel**, "
+               "**Send Messages** and **Attach Files**.")
+        ephemeral = True
+    elif isinstance(original, ApiUnavailable):
         msg = UNREACHABLE_MSG
     else:
         log.error("command failed", exc_info=original)
         msg = "Something went wrong while building that card. The details are in the bot's console."
     send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
-    await send(msg)
+    await send(msg, ephemeral=ephemeral)
 
 
 async def resolve_account(interaction: discord.Interaction, steamid: str | None) -> tuple[int | None, str | None]:

@@ -7,11 +7,12 @@ Posts a stats card after every Deadlock match you play, plus on-demand cards.
 | `/save <steamid> [name]` | Saves your Steam account; `/stats` and `/latestmatch` use it right away. |
 | `/link <steamid> [name]` | Same as `/save`, and also turns on automatic posting of new matches. |
 | `/unlink` | Forgets your saved account and stops automatic posts for you. |
-| `/setchannel [channel]` | (Admins) Channel for automatic cards. Defaults to the current one. |
+| `/setchannel [channel]` | (Admins) Channel for automatic match cards **and patch notes**. Defaults to the current one. |
 | `/stats [steamid]` | Overall card: matches, win rate, KDA, souls/min, top heroes with portraits, rank. |
 | `/matches [steamid] [count]` | Compact list of recent matches: result, hero, mode, KDA (default 10). |
 | `/latestmatch [steamid]` | Match card: hero portrait, result, match type (ranked/standard/bot/Street Brawl), K/D/A, combat stats, souls, and every item bought with its icon. |
 | `/matchstatus [match_id]` | Checks whether the Deadlock API has ingested a match: scoreboard, item/stats metadata, stored salts, or still queued. Defaults to your latest match. |
+| `/patchnotes [count]` | Posts the latest Deadlock patch notes from Steam (default 1, max 3) with a link to the post and a Hero Changes button. |
 
 `steamid` can be a SteamID64 (17 digits), a 32-bit account ID, or a `steamcommunity.com/profiles/...` link
 (custom `/id/name` links can't be resolved). Leave it empty to use your saved account. `name` is optional and
@@ -40,6 +41,17 @@ The bot checks every `POLL_SECONDS` (default 120). `/link` records your latest m
 matches are posted; at most 3 per cycle. Item data can lag a match by a few minutes, so a new match waits up to 5 cycles
 for it before being posted without items.
 
+## Patch notes
+
+The bot watches Steam's Deadlock news feed every `PATCH_POLL_SECONDS` (default 600, minimum 300) and posts new
+patch notes in the `/setchannel` channel as a normal message (not an embed): title, date, a quoted preview, a
+**Steam Patch Notes** link button, and a **Hero Changes** button when the patch touches heroes. That button opens a
+private hero picker (paginated when more than 25 heroes changed) showing only the lines for the hero you choose.
+
+`/patchnotes [count]` posts the newest notes on demand. The first `/setchannel` after this feature also posts the
+current patch as confirmation and records it as the baseline; channels configured before the upgrade start silently
+with the next patch, so nothing is backfilled.
+
 ## If something is empty or wrong
 
 Several response shapes were matched against documentation, not a live response. Run `probe.bat` (it asks for your
@@ -65,12 +77,13 @@ not bought from the shop) are left out of the grid on purpose. Icons are shown w
 
 ## Development
 
-`python -m unittest test_core test_deploy -v` runs the parsing/stats/database tests and the deploy script's
-tests. `python preview_cards.py` renders sample
+`python -m unittest test_core test_deploy test_patchnotes -v` runs the parsing/stats/database tests, the deploy
+script's tests and the Steam patch-note tests. `python preview_cards.py` renders sample
 cards with generated stand-in icons into `./preview/`. A custom font: put `bold.ttf` and `regular.ttf` in `assets/fonts/`.
 
-Files: `bot.py` commands + poller · `cards.py` image cards · `deadlock_api.py` / `statlocker.py` API clients ·
-`models.py` parsing · `images.py` download cache · `stats.py` aggregates · `steam.py` ID parsing · `db.py` storage ·
+Files: `bot.py` commands + pollers · `cards.py` image cards · `deadlock_api.py` / `statlocker.py` API clients ·
+`models.py` parsing · `steam_news.py` Steam patch-note parsing · `patchnote_views.py` patch-note buttons ·
+`images.py` download cache · `stats.py` aggregates · `steam.py` ID parsing · `db.py` storage ·
 `probe.py` live-data check.
 
 ## Deploying

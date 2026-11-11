@@ -4,15 +4,17 @@ Commands
   /save <steamid> [name]   save your Steam account; /stats and /latestmatch then use it right away
   /link <steamid> [name]   same as /save, and also enables automatic posting of new matches
   /unlink                  forget your saved account, and stop auto-posting for you
-  /setchannel [channel]    (admins) choose the channel for automatic match cards
+  /setchannel [channel]    (admins) choose the channel for automatic match cards and patch notes
   /stats [steamid]         overall stats card (defaults to your saved account)
   /latestmatch [steamid]   latest match card (defaults to your saved account)
   /matches [steamid] [count]  compact list of recent matches: result, hero, mode, KDA (default 10)
   /matchstatus [match_id]  check whether the Deadlock API has ingested a match (or it is queued)
+  /patchnotes [count]      post the latest Deadlock patch notes from Steam (default 1, max 3)
 """
 import asyncio
 import logging
 import os
+import time
 from collections import defaultdict
 
 import aiohttp
@@ -27,9 +29,11 @@ from deadlock_api import ApiUnavailable, DeadlockAPI
 from images import ImageStore
 from local_icons import LocalIcons
 from models import Match, ingest_verdict, match_type, merge_match, resolve_identity
+from patchnote_views import HeroChangesView, PatchNoteView
 from statlocker import StatlockerAPI, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import STEAM_INPUT_HELP, parse_steam_input
+from steam_news import fetch_feed, find_new_notes, is_patch_note, render_patch_content
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -38,6 +42,7 @@ log = logging.getLogger("bot")
 SHOP_SLOTS = {"weapon", "vitality", "spirit"}  # excludes hero ability upgrades, which share the items catalogue
 MAX_AUTOPOST_PER_CYCLE = 3  # per player, so a long gap never floods the channel
 MAX_WAIT_FOR_ITEMS = 5      # poll cycles to wait for a match's item data before posting without it
+PATCH_COOLDOWN = 30         # seconds between manual /patchnotes posts in the same channel
 UNREACHABLE_MSG = ("I couldn't reach api.deadlock-api.com (network or DNS problem on the bot's computer). "
                    "Check the internet connection and try again in a minute.")
 _SHORT_MODE = {"ranked": "Ranked", "brawl": "Brawl", "bot": "Bot", "standard": "Standard"}
@@ -55,6 +60,8 @@ class StatsBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.db = DB(os.getenv("DB_PATH", "bot.db"))
         self.poll_seconds = max(30, int(os.getenv("POLL_SECONDS", "120")))
+        self.patch_poll_seconds = max(300, int(os.getenv("PATCH_POLL_SECONDS", "600")))
+        self.patch_cooldown: dict[int, float] = {}  # channel id -> last manual /patchnotes post
         self.waits: dict[tuple, int] = defaultdict(int)  # (user, guild, match) -> cycles waited for items
         self.session: aiohttp.ClientSession | None = None
 
@@ -74,6 +81,15 @@ class StatsBot(discord.Client):
         await self.tree.sync()
         self.poll_matches.change_interval(seconds=self.poll_seconds)
         self.poll_matches.start()
+        self.poll_patches.change_interval(seconds=self.patch_poll_seconds)
+        self.poll_patches.start()
+        # Re-register the Hero Changes buttons of notes posted before this restart. The Steam
+        # link button needs no handler, so only the Hero button view has to be restored.
+        stored = [note for note in self.db.all_patch_notes() if note and note.heroes]
+        for note in stored:
+            self.add_view(HeroChangesView(self, note.guid, len(note.heroes)))
+        if stored:
+            log.info("patch notes: re-registered %d stored note(s) with hero changes", len(stored))
 
     async def close(self):
         if self.session:
@@ -208,6 +224,18 @@ class StatsBot(discord.Client):
             statlocker=bool(profile or lobby),
         ))
 
+    # --- patch notes ---------------------------------------------------------
+    async def fetch_patch_notes(self):
+        heroes = await self.dl.heroes()
+        notes = await fetch_feed(self.session, [asset.name for asset in heroes.values()])
+        return [note for note in notes if is_patch_note(note)]
+
+    async def send_patch_note(self, channel, note) -> None:
+        self.db.save_patch_note(note, int(time.time()))
+        await channel.send(content=render_patch_content(note),
+                           view=PatchNoteView(self, note=note),
+                           allowed_mentions=discord.AllowedMentions.none())
+
     # --- automatic posting ----------------------------------------------------
     @tasks.loop(seconds=120)
     async def poll_matches(self):
@@ -263,6 +291,50 @@ class StatsBot(discord.Client):
 
     @poll_matches.before_loop
     async def _wait_ready(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(seconds=600)
+    async def poll_patches(self):
+        states = self.db.all_patch_channels()
+        if not states:  # nobody has run /setchannel yet: don't touch the feed
+            return
+        try:
+            notes = await self.fetch_patch_notes()
+        except Exception:
+            log.exception("patch poll: could not read the Steam news feed")
+            return
+        if not notes:
+            log.warning("patch poll: the Steam feed contained no patch notes")
+            return
+        for state in states:
+            try:
+                channel_id = self.db.get_channel(state.guild_id)
+                if channel_id is None:
+                    continue
+                channel = self.get_channel(channel_id)
+                if channel is None:
+                    log.warning("patch poll: channel %s not found/visible for guild %s",
+                                channel_id, state.guild_id)
+                    continue
+                new, baseline = find_new_notes(notes, state.last_guid)
+                if not new:
+                    if baseline and baseline != state.last_guid:
+                        # first run for this guild, or the old guid fell off the 10-item feed:
+                        # record the newest note without posting so nobody gets flooded
+                        self.db.set_patch_baseline(state.guild_id, baseline, notes[0].pub_ts)
+                        log.info("patch poll: baseline for guild %s set to %s (nothing posted)",
+                                 state.guild_id, baseline)
+                    continue
+                for note in new:
+                    await self.send_patch_note(channel, note)
+                    self.db.set_patch_baseline(state.guild_id, note.guid, note.pub_ts)
+                    log.info("patch poll: posted %r to guild %s", note.title, state.guild_id)
+                    await asyncio.sleep(1)
+            except Exception:
+                log.exception("patch poll failed for guild %s", state.guild_id)
+
+    @poll_patches.before_loop
+    async def _wait_ready_patches(self):
         await self.wait_until_ready()
 
 
@@ -350,7 +422,32 @@ async def unlink(interaction: discord.Interaction):
     await interaction.response.send_message("Unlinked." if removed else "You weren't linked.", ephemeral=True)
 
 
-@bot.tree.command(name="setchannel", description="Choose the channel for automatic match cards")
+async def _enable_patch_notes(interaction: discord.Interaction, channel, channel_changed: bool):
+    """First /setchannel for a guild (or a new channel) also posts the newest patch note.
+
+    Returns an extra sentence for the confirmation reply, or None when nothing was posted.
+    """
+    state = bot.db.get_patch_channel(interaction.guild_id)
+    if state is not None and not channel_changed:
+        return None
+    try:
+        notes = await bot.fetch_patch_notes()
+    except Exception:
+        log.exception("could not fetch patch notes while setting the channel")
+        return "I couldn't reach the Steam news feed, so patch notes will start with the next one."
+    if not notes:
+        return None
+    note = notes[0]
+    try:
+        await bot.send_patch_note(channel, note)
+    except Exception:
+        log.exception("could not post the latest patch note while setting the channel")
+        return "I couldn't post the latest patch note here, so patch notes will start with the next one."
+    bot.db.set_patch_baseline(interaction.guild_id, note.guid, note.pub_ts)
+    return f"I also posted the latest patch note, **{note.title}**."
+
+
+@bot.tree.command(name="setchannel", description="Choose the channel for automatic match cards and patch notes")
 @app_commands.describe(channel="Channel to post in (defaults to this one)")
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
@@ -360,8 +457,54 @@ async def setchannel(interaction: discord.Interaction, channel: discord.TextChan
     if not (perms.send_messages and perms.attach_files):
         return await interaction.response.send_message(
             f"I need Send Messages and Attach Files in {channel.mention}.", ephemeral=True)
+    previous = bot.db.get_channel(interaction.guild_id)
     bot.db.set_channel(interaction.guild_id, channel.id)
-    await interaction.response.send_message(f"Match cards will be posted in {channel.mention}.")
+    # Reading the Steam feed can take a few seconds, so acknowledge before it starts;
+    # otherwise Discord times the interaction out.
+    await interaction.response.defer()
+    extra = await _enable_patch_notes(interaction, channel, previous != channel.id)
+    msg = f"Match cards and patch notes will be posted in {channel.mention}."
+    if extra:
+        msg += " " + extra
+    await interaction.followup.send(msg)
+
+
+@bot.tree.command(name="patchnotes", description="Post the latest Deadlock patch notes from Steam")
+@app_commands.describe(count="How many recent patch notes to post (default 1, max 3)")
+async def patchnotes(interaction: discord.Interaction, count: int = 1):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    channel = interaction.channel
+    if interaction.guild is not None:
+        perms = channel.permissions_for(interaction.guild.me)
+        if not perms.send_messages:
+            return await interaction.followup.send(
+                f"I need Send Messages in {channel.mention}.", ephemeral=True)
+
+    now = time.monotonic()
+    last = bot.patch_cooldown.get(channel.id, 0.0)
+    if now - last < PATCH_COOLDOWN:
+        wait = max(1, int(PATCH_COOLDOWN - (now - last)))
+        return await interaction.followup.send(
+            f"I just posted patch notes here. Try again in {wait}s.", ephemeral=True)
+
+    try:
+        notes = await bot.fetch_patch_notes()
+    except Exception:
+        log.exception("/patchnotes: could not read the Steam news feed")
+        return await interaction.followup.send(
+            "I couldn't reach the Steam news feed. Try again in a minute.", ephemeral=True)
+    if not notes:
+        return await interaction.followup.send(
+            "I couldn't find any patch notes in the Steam feed right now.", ephemeral=True)
+
+    chosen = list(reversed(notes[:max(1, min(count, 3))]))  # oldest first
+    for note in chosen:
+        await bot.send_patch_note(channel, note)
+        await asyncio.sleep(1)
+    bot.patch_cooldown[channel.id] = time.monotonic()
+    await interaction.followup.send(
+        f"Posted {len(chosen)} patch note{'s' if len(chosen) != 1 else ''} in {channel.mention}.",
+        ephemeral=True)
 
 
 @bot.tree.command(name="stats", description="Overall stats card")

@@ -18,7 +18,7 @@ services:
       # repo (as assets/ITEMS) and baked into the image on every build, so there's nothing to
       # bind-mount from the host here — one less thing to keep in sync across two machines.
     volumes:
-      - ./data:/app/data          # bot.db (links, channels) — the only thing that must persist
+      - ./data:/app/data          # bot.db (links, channels, posted patch notes) — the only thing that must persist
       - ./cache:/app/cache        # downloaded hero/item pictures (safe to lose, just re-downloads)
     logging:
       driver: json-file

@@ -66,7 +66,8 @@ docker compose logs -f
 ```
 
 Look for the Discord login confirmation (`^C` to stop watching, it keeps running). In Discord, run
-`/save <your steamid>` then `/latestmatch`.
+`/save <your steamid>` then `/latestmatch`. `/patchnotes` posts the latest Steam patch note (an admin
+runs `/setchannel` once to enable automatic match cards and patch notes).
 
 ## Everyday operations
 
@@ -80,8 +81,9 @@ Look for the Discord login confirmation (`^C` to stop watching, it keeps running
 
 ## What's persisted where
 
-- `./data/bot.db` — linked accounts and the channel to post in. **Back this up**; it's the only thing
-  that isn't easily rebuilt.
+- `./data/bot.db` — linked accounts, the channel to post in, and the patch notes already posted
+  (kept so their Hero Changes buttons still work after a restart). **Back this up**; it's the only
+  thing that isn't easily rebuilt.
 - `./cache/` — downloaded hero/item pictures. Safe to delete; it refills itself.
 - `./assets/items/` — your own icons, mounted read-only into the container so you can edit them on the
   VPS directly.

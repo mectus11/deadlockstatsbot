@@ -309,31 +309,35 @@ class StatsBot(discord.Client):
             return
         for guild_id, channel_id in channels.items():
             try:
-                state = states.get(guild_id)
-                if state is None:
-                    # The channel was configured before patch notes existed. Record the
-                    # newest note without posting, so upgrading never backfills the channel.
-                    self.db.set_patch_baseline(guild_id, notes[0].guid, notes[0].pub_ts)
-                    log.info("patch poll: baseline for guild %s set to %s (nothing posted)",
-                             guild_id, notes[0].guid)
-                    continue
                 channel = self.get_channel(channel_id)
                 if channel is None:
                     log.warning("patch poll: channel %s not found/visible for guild %s",
                                 channel_id, guild_id)
+                    continue
+                state = states.get(guild_id)
+                if state is None or not state.announced:
+                    # First poll for this channel: post the newest note once so the channel
+                    # is not empty until the next patch, then only post future notes.
+                    await self.send_patch_note(channel, notes[0])
+                    self.db.set_patch_baseline(guild_id, notes[0].guid, notes[0].pub_ts,
+                                               announced=True)
+                    log.info("patch poll: posted latest note %r to guild %s (first run)",
+                             notes[0].title, guild_id)
+                    await asyncio.sleep(1)
                     continue
                 new, baseline = find_new_notes(notes, state.last_guid)
                 if not new:
                     if baseline and baseline != state.last_guid:
                         # the old guid fell off the 10-item feed: record the newest note
                         # without posting so a long outage never floods the channel
-                        self.db.set_patch_baseline(guild_id, baseline, notes[0].pub_ts)
+                        self.db.set_patch_baseline(guild_id, baseline, notes[0].pub_ts,
+                                                   announced=True)
                         log.info("patch poll: baseline for guild %s set to %s (nothing posted)",
                                  guild_id, baseline)
                     continue
                 for note in new:
                     await self.send_patch_note(channel, note)
-                    self.db.set_patch_baseline(guild_id, note.guid, note.pub_ts)
+                    self.db.set_patch_baseline(guild_id, note.guid, note.pub_ts, announced=True)
                     log.info("patch poll: posted %r to guild %s", note.title, guild_id)
                     await asyncio.sleep(1)
             except Exception:
@@ -449,7 +453,7 @@ async def _enable_patch_notes(interaction: discord.Interaction, channel, channel
     except Exception:
         log.exception("could not post the latest patch note while setting the channel")
         return "I couldn't post the latest patch note here, so patch notes will start with the next one."
-    bot.db.set_patch_baseline(interaction.guild_id, note.guid, note.pub_ts)
+    bot.db.set_patch_baseline(interaction.guild_id, note.guid, note.pub_ts, announced=True)
     return f"I also posted the latest patch note, **{note.title}**."
 
 

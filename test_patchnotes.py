@@ -1,6 +1,7 @@
 """Tests for Steam patch-note parsing, rendering and storage (no network, no Discord)."""
 import html
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -182,8 +183,10 @@ class PatchStorage(unittest.TestCase):
             self.assertEqual(sorted(db.all_channels()), [(1, 10), (2, 20)])
             db.set_patch_baseline(1, "g1", 100)
             self.assertEqual(db.get_patch_channel(1).last_guid, "g1")
-            db.set_patch_baseline(1, "g2", 200)  # upsert
+            self.assertEqual(db.get_patch_channel(1).announced, 0)
+            db.set_patch_baseline(1, "g2", 200, announced=True)  # upsert
             self.assertEqual(db.all_patch_channels()[0].last_pub_ts, 200)
+            self.assertEqual(db.get_patch_channel(1).announced, 1)
 
             note = PatchNote("g2", "Minor Update", "https://x", 200,
                              ["- Apollo: x"], {"Apollo": ["x"]})
@@ -193,6 +196,22 @@ class PatchStorage(unittest.TestCase):
                              ("Minor Update", "https://x", ["- Apollo: x"], {"Apollo": ["x"]}))
             self.assertEqual([n.guid for n in db.all_patch_notes()], ["g2"])
             self.assertIsNone(db.get_patch_note("nope"))
+            db.conn.close()
+
+    def test_announced_column_is_added_to_an_old_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.db")
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE patch_channels (guild_id INTEGER PRIMARY KEY, "
+                         "last_guid TEXT, last_pub_ts INTEGER NOT NULL DEFAULT 0)")
+            conn.execute("INSERT INTO patch_channels VALUES (1, 'g1', 100)")
+            conn.commit()
+            conn.close()
+            db = DB(path)
+            state = db.get_patch_channel(1)
+            self.assertEqual((state.last_guid, state.announced), ("g1", 0))
+            db.set_patch_baseline(1, "g1", 100, announced=True)
+            self.assertEqual(db.get_patch_channel(1).announced, 1)
             db.conn.close()
 
     def test_notes_are_pruned_to_100(self):

@@ -48,9 +48,9 @@ patch notes in the `/setchannel` channel as a normal message (not an embed): tit
 **Steam Patch Notes** link button, and a **Hero Changes** button when the patch touches heroes. That button opens a
 private hero picker (paginated when more than 25 heroes changed) showing only the lines for the hero you choose.
 
-`/patchnotes [count]` posts the newest notes on demand. The first `/setchannel` after this feature also posts the
-current patch as confirmation and records it as the baseline; channels configured before the upgrade start silently
-with the next patch, so nothing is backfilled.
+`/patchnotes [count]` posts the newest notes on demand. `/setchannel` posts the current patch as confirmation
+when it is first run (or when the channel changes). A channel that was already configured before this feature
+gets the newest note once on the first poll, then only future patches — nothing older is backfilled.
 
 ## If something is empty or wrong
 

@@ -23,6 +23,7 @@ class PatchChannel:
     guild_id: int
     last_guid: str | None = None
     last_pub_ts: int = 0
+    announced: int = 0  # 0 until the note at last_guid has been posted (or deliberately skipped)
 
 
 class DB:
@@ -65,7 +66,8 @@ class DB:
             CREATE TABLE IF NOT EXISTS patch_channels (
                 guild_id INTEGER PRIMARY KEY,
                 last_guid TEXT,
-                last_pub_ts INTEGER NOT NULL DEFAULT 0
+                last_pub_ts INTEGER NOT NULL DEFAULT 0,
+                announced INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS patch_notes (
                 guid TEXT PRIMARY KEY,
@@ -83,6 +85,11 @@ class DB:
                 self.conn.execute(f"ALTER TABLE links ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass
+        try:  # migration: patch_channels gained `announced` after the first release
+            self.conn.execute(
+                "ALTER TABLE patch_channels ADD COLUMN announced INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
     # --- links -----------------------------------------------------------
@@ -154,12 +161,14 @@ class DB:
         ).fetchone()
         return PatchChannel(**dict(r)) if r else None
 
-    def set_patch_baseline(self, guild_id: int, guid: str | None, pub_ts: int = 0) -> None:
+    def set_patch_baseline(self, guild_id: int, guid: str | None, pub_ts: int = 0,
+                           announced: bool = False) -> None:
         self.conn.execute(
-            "INSERT INTO patch_channels (guild_id, last_guid, last_pub_ts) VALUES (?,?,?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET last_guid=excluded.last_guid, "
-            "last_pub_ts=excluded.last_pub_ts",
-            (guild_id, guid, pub_ts),
+            "INSERT INTO patch_channels (guild_id, last_guid, last_pub_ts, announced) "
+            "VALUES (?,?,?,?) ON CONFLICT(guild_id) DO UPDATE SET "
+            "last_guid=excluded.last_guid, last_pub_ts=excluded.last_pub_ts, "
+            "announced=excluded.announced",
+            (guild_id, guid, pub_ts, int(announced)),
         )
         self.conn.commit()
 

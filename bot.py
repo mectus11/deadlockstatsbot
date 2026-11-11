@@ -178,6 +178,44 @@ class StatsBot(discord.Client):
         detail = await self.dl.match_detail(m.match_id, account_id)
         return merge_match(m, detail) if detail else m
 
+    async def party_members(self, m: Match, account_id: int,
+                            heroes: dict) -> list[cards.PartyMemberView]:
+        """Same-party mates for one match, with hero art and Steam names. Empty
+        when metadata is missing, nobody partied, or the lookup fails."""
+        if not m.roster:
+            return []
+        mates = await self.dl.mate_stats(account_id, m.match_id, m.game_mode)
+        rows = [p for p in m.roster
+                if p.account_id in mates and p.account_id != account_id
+                and (m.team is None or p.team == m.team)]  # same_party is same-team already
+        rows.sort(key=lambda p: p.player_slot if p.player_slot is not None else 99)
+        rows = rows[:5]  # a party is at most six including you
+        if not rows:
+            return []
+        profiles = await self.dl.steam_profiles([p.account_id for p in rows])
+        urls = []
+        for p in rows:
+            hero, profile = heroes.get(p.hero_id), profiles.get(p.account_id)
+            urls.extend([hero.image if hero else None, profile.avatar_url if profile else None])
+        pics = await self.images.get_many(urls)
+        out = []
+        for p in rows:
+            hero, profile = heroes.get(p.hero_id), profiles.get(p.account_id)
+            if hero:
+                hero_name = hero.name
+            elif p.hero_id is not None:
+                hero_name = f"Hero #{p.hero_id}"
+            else:
+                hero_name = "Unknown hero"
+            out.append(cards.PartyMemberView(
+                name=(profile.name if profile else None) or f"Account {p.account_id}",
+                hero=hero_name, kills=p.kills, deaths=p.deaths, assists=p.assists,
+                net_worth=p.net_worth,
+                hero_icon=pics.get(hero.image) if hero and hero.image else None,
+                avatar=pics.get(profile.avatar_url) if profile and profile.avatar_url else None,
+            ))
+        return out
+
     async def render_match(self, account_id: int, m: Match, fallback_name: str | None = None,
                            track: tuple[int, int] | None = None):
         """track=(discord_id, guild_id): compares PP to the value stored for this player's own
@@ -201,6 +239,7 @@ class StatsBot(discord.Client):
         known = [a for _, a in catalogued if a and a.slot in SHOP_SLOTS]
         unknown = sum(1 for _, a in catalogued if a is None)
         own = {a.id: self.local.get(a.name, a.tier) for a in known}  # your files in assets/items win
+        party = await self.party_members(m, account_id, heroes)
         pics = await self.images.get_many([hero.image if hero else None, identity.avatar_url,
                                            *(a.image for a in known if not own[a.id])])
         mode_kind, mode = match_type(m)
@@ -216,6 +255,7 @@ class StatsBot(discord.Client):
             avatar=pics.get(identity.avatar_url) if identity.avatar_url else None,
             items=[cards.ItemView(a.name, own[a.id] or pics.get(a.image), a.slot, a.tier) for a in known],
             unnamed_items=unknown,
+            party=party,
             own_lobby_rank=rank_name(lobby.own_rank) if lobby else None,
             enemy_lobby_rank=rank_name(lobby.enemy_rank) if lobby else None,
             rank_name=rank_name(profile.rank_number) if profile else None,

@@ -66,6 +66,20 @@ class BrawlRound:
     duration_s: int | None = None
 
 
+@dataclass(frozen=True)
+class RosterPlayer:
+    """One row of the 12-player match roster. Metadata has no party field, so the
+    party is derived from account IDs (see `mate_ids`) intersected with this list."""
+    account_id: int
+    hero_id: int | None = None
+    team: int | str | None = None
+    kills: int | None = None
+    deaths: int | None = None
+    assists: int | None = None
+    net_worth: int | None = None
+    player_slot: int | None = None
+
+
 @dataclass
 class Match:
     match_id: int
@@ -88,6 +102,7 @@ class Match:
     stats: MatchStats | None = None
     brawl_rounds: list[BrawlRound] = field(default_factory=list)
     items: list[ItemBuy] = field(default_factory=list)  # final build, purchase order
+    roster: list[RosterPlayer] = field(default_factory=list)  # all players, from metadata only
 
     @property
     def brawl_score(self) -> tuple[int, int] | None:
@@ -254,6 +269,23 @@ def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Ma
         return None
     winner, team = _team(_pick(info, "winning_team")), _team(_pick(me, "team", "player_team"))
     stats = _last_stats(me)
+    roster = []
+    for p in info["players"]:
+        if not isinstance(p, dict):
+            continue
+        aid = _int(p.get("account_id"))
+        if aid is None:
+            continue
+        roster.append(RosterPlayer(
+            account_id=aid,
+            hero_id=_int(_pick(p, "hero_id")),
+            team=_team(_pick(p, "team", "player_team")),
+            kills=_int(_pick(p, "kills", "player_kills")),
+            deaths=_int(_pick(p, "deaths", "player_deaths")),
+            assists=_int(_pick(p, "assists", "player_assists")),
+            net_worth=_int(_pick(p, "net_worth")),
+            player_slot=_int(_pick(p, "player_slot")),
+        ))
     buys = []
     for it in me.get("items") or []:
         iid = _int(_pick(it, "item_id", "upgrade_id", "id")) if isinstance(it, dict) else None
@@ -281,6 +313,7 @@ def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Ma
         stats=stats,
         brawl_rounds=_brawl_rounds(info),
         items=final_items(buys),
+        roster=roster,
     )
 
 
@@ -291,9 +324,28 @@ def merge_match(base: Match, detail: Match) -> Match:
         if f.name == "items":
             continue
         b, d = getattr(base, f.name), getattr(detail, f.name)
-        # an empty list is "missing" for brawl rounds, otherwise it would shadow the metadata
-        vals[f.name] = (b or d) if f.name == "brawl_rounds" else (b if b is not None else d)
+        # an empty list is "missing" for brawl rounds and the roster, otherwise it
+        # would shadow the metadata
+        vals[f.name] = (b or d) if f.name in ("brawl_rounds", "roster") else (
+            b if b is not None else d)
     return Match(**vals, items=detail.items or base.items)
+
+
+def mate_ids(rows, match_id: int) -> set[int]:
+    """Accounts the API considers same-party for one match, from a mate-stats
+    response. Keeps only rows whose `matches` list contains this match."""
+    out = set()
+    for row in (rows if isinstance(rows, list) else []):
+        if not isinstance(row, dict):
+            continue
+        aid = _int(_pick(row, "mate_id", "account_id"))
+        if aid is None:
+            continue
+        ids = row.get("matches")
+        if isinstance(ids, list) and ids and _int(match_id) not in {_int(x) for x in ids}:
+            continue
+        out.add(aid)
+    return out
 
 
 # --- assets (heroes, items) ------------------------------------------------
@@ -377,6 +429,21 @@ def parse_steam_profile(payload) -> SteamProfile | None:
     if not name and not avatar:
         return None
     return SteamProfile(name, avatar, _str(_pick(row, "profileurl", "profile_url")))
+
+
+def parse_steam_profiles(payload) -> dict[int, SteamProfile]:
+    """Batch form of parse_steam_profile, keyed by account_id. Rows without an
+    account ID or a usable persona/avatar are skipped."""
+    rows = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        aid = _int(_pick(row, "account_id", "accountId"))
+        profile = parse_steam_profile(row)
+        if aid is not None and profile:
+            out[aid] = profile
+    return out
 
 
 @dataclass(frozen=True)

@@ -12,9 +12,9 @@ except ImportError:
 from db import DB
 from local_icons import LocalIcons, norm
 from models import (BrawlRound, ItemBuy, Match, MatchStats, SteamProfile, final_items,
-                    ingest_verdict, match_type, merge_match, normalize_entry, normalize_metadata,
-                    parse_assets, parse_match_info, parse_salts, parse_steam_profile, pick_image,
-                    resolve_identity)
+                    ingest_verdict, match_type, mate_ids, merge_match, normalize_entry,
+                    normalize_metadata, parse_assets, parse_match_info, parse_salts,
+                    parse_steam_profile, parse_steam_profiles, pick_image, resolve_identity)
 from statlocker import parse_lobby, parse_profile, rank_badge_url, rank_name
 from stats import compute_overall
 from steam import account_to_steam64, parse_steam_input
@@ -86,6 +86,26 @@ class Metadata(unittest.TestCase):
         keep = merge_match(Match(77, kills=1), normalize_metadata(META, 5))
         self.assertEqual(keep.kills, 1)  # history value wins when present
 
+    def test_roster_is_parsed_from_all_players(self):
+        m = normalize_metadata(META, 5)
+        self.assertEqual([p.account_id for p in m.roster], [5, 6])
+        me = m.roster[0]
+        self.assertEqual((me.hero_id, me.team, me.kills, me.deaths, me.assists, me.net_worth),
+                         (3, 1, 7, 2, 11, 38000))
+        # an empty history roster must not shadow the metadata roster
+        merged = merge_match(Match(77), m)
+        self.assertEqual([p.account_id for p in merged.roster], [5, 6])
+
+    def test_mate_ids_filters_by_match(self):
+        rows = [{"mate_id": 10, "matches": [77, 78]},
+                {"mate_id": 11, "matches": [78]},
+                {"mate_id": 12},  # no match list: keep the API's own filtering
+                {"account_id": 13, "matches": [77]},
+                "junk", {"matches": [77]}]
+        self.assertEqual(mate_ids(rows, 77), {10, 12, 13})
+        self.assertEqual(mate_ids(None, 77), set())
+        self.assertEqual(mate_ids(rows, 99), {12})
+
 
 class Assets(unittest.TestCase):
     def test_pick_image_prefers_raster_over_svg(self):
@@ -129,6 +149,19 @@ class SteamIdentity(unittest.TestCase):
         for bad in (None, [], {}, {"personaname": None, "avatarfull": None}, "junk", [None, 3]):
             self.assertIsNone(parse_steam_profile(bad), bad)
         self.assertEqual(parse_steam_profile({"players": [{"personaname": "Y"}]}).name, "Y")
+
+    def test_parse_profiles_batch_is_keyed_by_account(self):
+        got = parse_steam_profiles([
+            {"account_id": 7, "personaname": "Mectus", "avatarfull": "a.jpg"},
+            {"account_id": 8, "personaname": "Nyx", "avatar": "b.jpg"},
+            {"account_id": 9},  # no name/avatar: skipped
+            {"personaname": "no id"},
+            "junk",
+        ])
+        self.assertEqual(sorted(got), [7, 8])
+        self.assertEqual((got[7].name, got[7].avatar_url), ("Mectus", "a.jpg"))
+        self.assertEqual(got[8].avatar_url, "b.jpg")
+        self.assertEqual(parse_steam_profiles(None), {})
 
     def test_avatar_and_name_precedence(self):
         sl = types.SimpleNamespace(name="Statlocker", avatar_url="sl.jpg")
@@ -434,6 +467,14 @@ class MatchCardStats(unittest.TestCase):
 
     def test_renders_without_stats(self):
         png = self._card()  # old payload: no stats, no mode
+        self.assertGreater(len(png.getvalue()), 0)
+
+    def test_renders_party_panel(self):
+        import cards
+        party = [cards.PartyMemberView("Mectus", "Abrams", 7, 5, 19, 41230),
+                 cards.PartyMemberView("Nyx", "Haze", 14, 2, 9, 52880),
+                 cards.PartyMemberView("Unknown", "Hero #99", None, None, None, None)]
+        png = self._card(party=party, stats=MatchStats(hero_damage=1))
         self.assertGreater(len(png.getvalue()), 0)
 
 

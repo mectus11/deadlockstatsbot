@@ -23,7 +23,7 @@ from models import MatchStats
 from stats import Overall
 from theme import (BRASS, EMBER, EMERALD, FAINT, GOLD, GREEN, INK, INK_BOTTOM,
                    INK_TOP, LINE, LINE_2, LINE_3, MINT, MODE_COLORS, MUTED, PANEL,
-                   PANEL_2, RED, SLOT_COLORS, SLOT_ORDER, STEEL, TEXT, VIOLET)
+                   PANEL_2, PANEL_3, RED, SLOT_COLORS, SLOT_ORDER, STEEL, TEXT, VIOLET)
 
 log = logging.getLogger("cards")
 
@@ -50,6 +50,7 @@ ITEM_SIZE, ITEM_GAP, ITEMS_PER_ROW, MAX_ITEMS = 64, 8, 12, 24
 ITEM_LABEL_H = 15  # a name under each icon, so items are identifiable even when the art is unfamiliar
 ITEM_CELL_H = ITEM_SIZE + ITEM_LABEL_H
 STATS_PANEL_H = 196
+PARTY_ROW_H = 44
 FONT_DIR = Path(__file__).parent / "assets" / "fonts"
 
 # (file, variable-font weight or None)
@@ -677,6 +678,35 @@ def _stats_panel(c: Canvas, x, y, w, h, s: MatchStats):
                        9, MUTED, True, "la", 1.2)
 
 
+def _party_panel(c: Canvas, x, y, w, h, party: list["PartyMemberView"]):
+    """Same-party mates: hero tile, name, hero played, K/D/A and net worth."""
+    c.panel(x, y, w, h)
+    c.panel_header(x + 24, y + 16, w - 48, "PARTY",
+                   f"YOU + {len(party)} MATE{'S' if len(party) != 1 else ''}")
+    top = y + 46
+    for i, p in enumerate(party):
+        cy = top + i * PARTY_ROW_H + PARTY_ROW_H / 2
+        c.icon(p.hero_icon, x + 24, cy - 16, 32, 32, cut=5, border=LINE, label=p.hero,
+               focus=(0.5, 0.3))
+        c.icon(p.avatar, x + 62, cy - 16, 32, 32, cut=5, border=LINE_2, bg=PANEL_3,
+               label=(p.name[:1] or "?").upper(), focus=(0.5, 0.35))
+        c.tracked_text(x + 106, cy, c.fit_tracked(p.name.upper(), 14, True, 160, 1.2, "display"),
+                       14, TEXT, True, "lm", 1.2, family="display")
+        c.tracked_text(x + 292, cy, c.fit_tracked(p.hero.upper(), 9.5, True, 190, 1.6),
+                       9.5, MUTED, True, "lm", 1.6)
+        kx = x + 564
+        for j, (val, col) in enumerate(((p.kills, GREEN), (p.deaths, RED), (p.assists, TEXT))):
+            c.text(kx + j * 46, cy, _fmt(val), 15, col, True, "rm")
+            if j < 2:
+                c.text(kx + j * 46 + 6, cy, "/", 11, FAINT, False, "lm")
+        if p.net_worth is not None:
+            nw = _fmt(p.net_worth, "{:,.0f}")
+            c.text(x + w - 24, cy, nw, 14, MINT, True, "rm")
+            c.soul(x + w - 24 - c.text_w(nw, 14, True) - 12, cy, 15)
+        if i < len(party) - 1:
+            c.divider(x + 24, top + (i + 1) * PARTY_ROW_H, w - 48, LINE)
+
+
 # =============================================================================
 @dataclass
 class HeroRow:
@@ -784,6 +814,20 @@ class ItemView:
 
 
 @dataclass
+class PartyMemberView:
+    """One same-party mate on the match card. `hero_icon`/`avatar` are already
+    downloaded bytes by render time (the bot swaps the URLs it used to load them)."""
+    name: str
+    hero: str
+    kills: int | None = None
+    deaths: int | None = None
+    assists: int | None = None
+    net_worth: int | None = None
+    hero_icon: bytes | None = None
+    avatar: bytes | None = None
+
+
+@dataclass
 class MatchCardData:
     name: str
     hero: str
@@ -800,6 +844,7 @@ class MatchCardData:
     hero_icon: bytes | None = None
     avatar: bytes | None = None
     items: list[ItemView] = field(default_factory=list)
+    party: list[PartyMemberView] = field(default_factory=list)  # same-party mates, excluding you
     unnamed_items: int = 0  # bought, but no catalogue entry to show
     mode: str | None = None             # match-type tag, e.g. "Ranked" / "Street Brawl"
     mode_kind: str | None = None        # ranked / brawl / bot / standard / other (tag colour)
@@ -824,7 +869,10 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
 
     y_kda, kda_h = 192, 150
     y_items = (y_kda + kda_h) + 14 + (STATS_PANEL_H + 14 if d.stats else 0)
-    y_end = y_items + items_h
+    party = d.party[:5]  # a party is at most six including you
+    party_h = 58 + len(party) * PARTY_ROW_H if party else 0
+    y_party = y_items + items_h + 14
+    y_end = (y_party + party_h) if party else (y_items + items_h)
     y = y_end + 18 + (26 if has_lobby else 0)
     c = Canvas(1000, y + 48)
 
@@ -925,6 +973,10 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     if len(items) > MAX_ITEMS:
         c.tracked_text(936, y_items + items_h - 16, f"+{len(items) - MAX_ITEMS} MORE", 9, MUTED,
                        True, "ra", 1.4)
+
+    # party ----------------------------------------------------------------
+    if party:
+        _party_panel(c, 40, y_party, 920, party_h, party)
 
     # lobby + footer --------------------------------------------------------
     y = y_end + 18

@@ -10,8 +10,8 @@ import time
 import aiohttp
 
 from models import (HERO_IMAGE_KEYS, ITEM_IMAGE_KEYS, Asset, Match, MatchInfo, Salts,
-                    SteamProfile, _int, normalize_entry, normalize_metadata, parse_assets,
-                    parse_match_info, parse_salts, parse_steam_profile)
+                    SteamProfile, _int, mate_ids, normalize_entry, normalize_metadata, parse_assets,
+                    parse_match_info, parse_salts, parse_steam_profile, parse_steam_profiles)
 
 log = logging.getLogger("deadlock_api")
 
@@ -20,6 +20,7 @@ ASSET_TTL = 6 * 3600
 STEAM_TTL = 6 * 3600          # persona + avatar rarely change; the response carries a friends list
 STEAM_MISS_TTL = 600          # do not hammer a private/failed profile
 INFO_TTL = 30                 # /v1/matches/metadata allows only 30 req/min per IP
+MATE_TTL = 6 * 3600           # party membership of an ingested match never changes
 RECENT_TTL = 60               # the recently-fetched feed is ~1 MB
 
 
@@ -34,6 +35,7 @@ class DeadlockAPI:
         self._assets: dict[str, tuple[float, dict[int, Asset]]] = {}
         self._steam: dict[int, tuple[float, SteamProfile | None]] = {}
         self._info: dict[int, tuple[float, int | None, MatchInfo | None]] = {}
+        self._mates: dict[tuple[int, int], tuple[float, set[int]]] = {}
         self._recent: tuple[float, set[int]] | None = None
 
     async def _request(self, url: str, params: dict | None = None, retries: int = 2,
@@ -80,6 +82,27 @@ class DeadlockAPI:
         data = await self._get_json(f"{BASE}/v1/matches/{match_id}/metadata")
         return normalize_metadata(data, account_id, match_id) if data else None
 
+    async def mate_stats(self, account_id: int, match_id: int,
+                         game_mode: int | None = None) -> set[int]:
+        """Accounts the API treats as same-party for this match. This is its own
+        heuristic (same team + Steam friends at match start), not exact lobby
+        membership. Cached per match; failures are not cached."""
+        key = (account_id, match_id)
+        now = time.monotonic()
+        hit = self._mates.get(key)
+        if hit and now - hit[0] < MATE_TTL:
+            return hit[1]
+        params = {"same_party": "true", "min_match_id": match_id, "max_match_id": match_id,
+                  "min_matches_played": 1}
+        if game_mode == 4:  # the endpoint defaults to normal games
+            params["game_mode"] = "street_brawl"
+        status, data = await self._request(f"{BASE}/v1/players/{account_id}/mate-stats", params)
+        if status != 200:
+            return set()
+        mates = mate_ids(data, match_id)
+        self._mates[key] = (now, mates)
+        return mates
+
     # --- catalogue (names + image URLs) ------------------------------------
     async def _catalogue(self, kind: str, image_keys) -> dict[int, Asset]:
         hit = self._assets.get(kind)
@@ -117,6 +140,33 @@ class DeadlockAPI:
         profile = parse_steam_profile(data) if status == 200 else None
         self._steam[account_id] = (now, profile)
         return profile
+
+    async def steam_profiles(self, account_ids) -> dict[int, SteamProfile]:
+        """Batch personas/avatars in one request (the endpoint takes up to 1000
+        IDs). Reuses and fills the single-profile cache; missing rows are cached
+        as misses so a private profile is not retried every card."""
+        ids = [int(a) for a in dict.fromkeys(account_ids) if a]
+        if not ids:
+            return {}
+        now = time.monotonic()
+        out, missing = {}, []
+        for aid in ids:
+            hit = self._steam.get(aid)
+            if hit and now - hit[0] < (STEAM_TTL if hit[1] else STEAM_MISS_TTL):
+                if hit[1]:
+                    out[aid] = hit[1]
+            else:
+                missing.append(aid)
+        if missing:
+            status, data = await self._request(
+                f"{BASE}/v1/players/steam", {"account_ids": ",".join(map(str, missing))})
+            parsed = parse_steam_profiles(data) if status == 200 else {}
+            for aid in missing:
+                profile = parsed.get(aid)
+                self._steam[aid] = (now, profile)
+                if profile:
+                    out[aid] = profile
+        return out
 
     # --- ingest status (/matchstatus) --------------------------------------
     async def match_info(self, match_id: int) -> tuple[int | None, MatchInfo | None]:

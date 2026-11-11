@@ -326,6 +326,23 @@ save("match_sparse.png", cards.render_match_card(cards.MatchCardData(
 save("match_many_items.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(4), items=items * 2, mode="Ranked", mode_kind="ranked",
     stats=sample_stats, **common)))
+party = [
+    cards.PartyMemberView("Mectus", "Abrams", 7, 5, 19, 41230, fake_icon(5), fake_icon(3)),
+    cards.PartyMemberView("Nyx", "Haze", 14, 2, 9, 52880, fake_icon(6), fake_icon(8)),
+    cards.PartyMemberView("Corvid", "Lady Geist", 4, 7, 22, 37110, fake_icon(4), fake_icon(9)),
+]
+save("match_party.png", cards.render_match_card(cards.MatchCardData(
+    won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items,
+    party=party, own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3", rank_name="Oracle 4",
+    pp_score=4250, pp_delta=86, statlocker=True, mode="Ranked", mode_kind="ranked",
+    stats=sample_stats, **common)))
+save("match_party_full.png", cards.render_match_card(cards.MatchCardData(
+    won=False, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items[:8],
+    party=party + [
+        cards.PartyMemberView("Vesper", "Seven", 9, 6, 13, 44900, fake_icon(2), fake_icon(7)),
+        cards.PartyMemberView("Ash", "Vindicta", 3, 9, 6, 31850, fake_icon(3), fake_icon(6)),
+    ],
+    mode="Standard", mode_kind="standard", stats=sample_stats, **common)))
 save("matches.png", cards.render_matches_card(cards.MatchesCardData(
     name="ExamplePlayer", account_id=123456789, avatar=fake_icon(3), statlocker=True,
     matches=[cards.MatchRow("Infernus", True, 11, 4, 17, 41525919, 1757346341, 2174,

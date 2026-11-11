@@ -10,7 +10,7 @@ Posts a stats card after every Deadlock match you play, plus on-demand cards.
 | `/setchannel [channel]` | (Admins) Channel for automatic match cards **and patch notes**. Defaults to the current one. |
 | `/stats [steamid]` | Overall card: matches, win rate, KDA, souls/min, top heroes with portraits, rank. |
 | `/matches [steamid] [count]` | Compact list of recent matches: result, hero, mode, KDA (default 10). |
-| `/latestmatch [steamid]` | Match card: hero portrait, result, match type (ranked/standard/bot/Street Brawl), K/D/A, combat stats, souls, and every item bought with its icon. |
+| `/latestmatch [steamid]` | Match card: hero portrait, result, match type (ranked/standard/bot/Street Brawl), K/D/A, combat stats, souls, every item bought with its icon, and the party you queued with. |
 | `/matchstatus [match_id]` | Checks whether the Deadlock API has ingested a match: scoreboard, item/stats metadata, stored salts, or still queued. Defaults to your latest match. |
 | `/patchnotes [count]` | Posts the latest Deadlock patch notes from Steam (default 1, max 3) with a link to the post and a Hero Changes button. |
 
@@ -40,6 +40,11 @@ Elsewhere: `pip install -r requirements.txt`, then `python bot.py` (Python 3.10+
 The bot checks every `POLL_SECONDS` (default 120). `/link` records your latest match as a baseline, so only newer
 matches are posted; at most 3 per cycle. Item data can lag a match by a few minutes, so a new match waits up to 5 cycles
 for it before being posted without items.
+
+Match cards also show a **PARTY** panel with the mates you queued with: their hero, K/D/A and net worth. The API has no
+exact party field, so this uses its `same_party` heuristic (same team plus Steam friends at match start). It can miss a
+non-friend party member or include a friend who happened to be on your team. The panel is hidden when no mates are
+detected, so solo cards look unchanged.
 
 ## Patch notes
 

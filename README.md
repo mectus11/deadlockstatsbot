@@ -3,6 +3,10 @@
 </div>
 
 <p align="center">
+  <img src="docs/logo.webp" alt="Deadlock Stats Bot logo" width="128">
+</p>
+
+<p align="center">
   <strong>Noir, art-deco match cards for Deadlock — posted to Discord automatically.</strong><br>
   Every item, every stat, every party member. Plus overall stats, recent-match lists and patch notes.
 </p>
@@ -14,6 +18,7 @@
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-1b1d24?style=flat-square&logo=python&logoColor=white">
   <img alt="discord.py" src="https://img.shields.io/badge/discord.py-2.x-5865F2?style=flat-square&logo=discord&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-ready-2496ED?style=flat-square&logo=docker&logoColor=white">
+  <img alt="Made with Claude + OpenCode" src="https://img.shields.io/badge/made%20with-Claude%20%2B%20OpenCode-D97757?style=flat-square">
 </p>
 
 ## A card after every match
@@ -140,6 +145,12 @@ image URL actually downloads. Typical results:
 - Cards show `-` for kills/souls, or the result is wrong: the match-history/metadata field names differ; send the output.
 - No item or hero pictures (labelled grey tiles instead): the image field names or host differ; send the output.
 - Hero names show as `Hero #12`: the hero list couldn't be loaded (check the console for a warning).
+
+## Built with AI
+
+This project was made with AI: the code, card renderer and documentation were built in a combination of
+[**Claude**](https://claude.ai) (Anthropic) and [**OpenCode**](https://opencode.ai), with the bot's owner directing the
+work and testing every change on a live Discord server.
 
 ## Development
 

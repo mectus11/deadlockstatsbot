@@ -314,7 +314,11 @@ class StatsBot(discord.Client):
                     self.waits.pop(key, None)
                     log.info("posting match %s for account %s to channel %s", m.match_id, link.account_id,
                              channel_id)
-                    poster_name = link.display_name or f"Account {link.account_id}"
+                    poster_name = link.display_name
+                    if not poster_name:  # links made without a name: use the Steam persona
+                        steam = await self.dl.steam_profile(link.account_id)
+                        poster_name = steam.name if steam else None
+                    poster_name = poster_name or f"Account {link.account_id}"
                     await channel.send(
                         content=f"**{poster_name}** just finished a match",
                         file=discord.File(await self.render_match(link.account_id, full, link.display_name,
@@ -433,9 +437,11 @@ async def _save_account(interaction: discord.Interaction, steamid: str, name: st
     acc = parse_steam_input(steamid)
     if acc is None:
         return STEAM_INPUT_HELP
-    history = await bot.dl.match_history(acc)
-    bot.db.set_link(interaction.user.id, interaction.guild_id, acc, history[0].match_id if history else 0, name)
-    msg = f"Saved account `{acc}`" + (f" as **{name}**" if name else "") + "."
+    history, steam = await asyncio.gather(bot.dl.match_history(acc), bot.dl.steam_profile(acc))
+    display_name = name or (steam.name if steam else None)  # no name: use the Steam persona
+    bot.db.set_link(interaction.user.id, interaction.guild_id, acc,
+                    history[0].match_id if history else 0, display_name)
+    msg = f"Saved account `{acc}`" + (f" as **{display_name}**" if display_name else "") + "."
     msg += " `/stats` and `/latestmatch` will use it by default now."
     msg += f" Found {len(history)} matches." if history else \
         " I found no match history yet; that's fine, new matches will show up once they're available."
@@ -444,7 +450,7 @@ async def _save_account(interaction: discord.Interaction, steamid: str, name: st
 
 @bot.tree.command(name="save", description="Save your Steam account so /stats and /latestmatch use it immediately")
 @app_commands.describe(steamid="SteamID64, 32-bit account ID, or steamcommunity.com/profiles/ link",
-                       name="Optional name to show on your cards")
+                       name="Optional name to show on your cards (defaults to your Steam persona)")
 @app_commands.guild_only()
 async def save(interaction: discord.Interaction, steamid: str, name: str | None = None):
     await interaction.response.defer(ephemeral=True)
@@ -453,7 +459,7 @@ async def save(interaction: discord.Interaction, steamid: str, name: str | None 
 
 @bot.tree.command(name="link", description="Link your Steam account so new matches are posted automatically")
 @app_commands.describe(steamid="SteamID64, 32-bit account ID, or steamcommunity.com/profiles/ link",
-                       name="Optional name to show on your cards")
+                       name="Optional name to show on your cards (defaults to your Steam persona)")
 @app_commands.guild_only()
 async def link(interaction: discord.Interaction, steamid: str, name: str | None = None):
     await interaction.response.defer(ephemeral=True)

@@ -15,8 +15,9 @@ Posts a stats card after every Deadlock match you play, plus on-demand cards.
 | `/patchnotes [count]` | Posts the latest Deadlock patch notes from Steam (default 1, max 3) with a link to the post and a Hero Changes button. |
 
 `steamid` can be a SteamID64 (17 digits), a 32-bit account ID, or a `steamcommunity.com/profiles/...` link
-(custom `/id/name` links can't be resolved). Leave it empty to use your saved account. `name` is optional and
-is only shown on the card when Statlocker isn't set up (it doesn't change your in-game profile).
+(custom `/id/name` links can't be resolved). Leave it empty to use your saved account. `name` is optional; if you
+leave it out, the bot uses your Steam persona. It is only shown on the card when Statlocker isn't set up (it doesn't
+change your in-game profile).
 
 ## Setup (Windows)
 

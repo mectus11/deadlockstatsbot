@@ -8,6 +8,10 @@
 </p>
 
 <p align="center">
+  <a href="https://mectus11.github.io/deadlockstatsbot/">mectus11.github.io/deadlockstatsbot</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/mectus11/deadlockstatsbot/actions/workflows/docker-publish.yml">
     <img alt="Docker build" src="https://github.com/mectus11/deadlockstatsbot/actions/workflows/docker-publish.yml/badge.svg">
   </a>

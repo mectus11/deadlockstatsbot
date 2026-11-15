@@ -10,6 +10,9 @@ Commands
   /matches [steamid] [count]  compact list of recent matches: result, hero, mode, KDA (default 10)
   /matchstatus [match_id]  check whether the Deadlock API has ingested a match (or it is queued)
   /patchnotes [count]      post the latest Deadlock patch notes from Steam (default 1, max 3)
+  /pause, /resume          stop/start automatic match posts for your linked account
+  /settings show|channel   (admins) see and route match cards and patch notes per feature
+  /help, /status, /invite  command help, bot/API health, and the bot's invite link
 """
 import asyncio
 import logging
@@ -24,6 +27,8 @@ from discord.ext import tasks
 from dotenv import load_dotenv
 
 import cards
+import theme as T
+from card_views import MatchRefreshView
 from db import DB
 from deadlock_api import ApiUnavailable, DeadlockAPI
 from images import ImageStore
@@ -32,7 +37,7 @@ from models import Match, ingest_verdict, match_type, merge_match, resolve_ident
 from patchnote_views import HeroChangesView, PatchNoteView
 from statlocker import StatlockerAPI, rank_badge_url, rank_name
 from stats import compute_overall
-from steam import STEAM_INPUT_HELP, parse_steam_input
+from steam import STEAM_INPUT_HELP, find_steam_input, parse_steam_input
 from steam_news import fetch_feed, find_new_notes, is_patch_note, render_patch_content
 
 load_dotenv()
@@ -43,6 +48,10 @@ SHOP_SLOTS = {"weapon", "vitality", "spirit"}  # excludes hero ability upgrades,
 MAX_AUTOPOST_PER_CYCLE = 3  # per player, so a long gap never floods the channel
 MAX_WAIT_FOR_ITEMS = 5      # poll cycles to wait for a match's item data before posting without it
 PATCH_COOLDOWN = 30         # seconds between manual /patchnotes posts in the same channel
+REFRESH_COOLDOWN = 10       # seconds between Refresh clicks on the same match card
+_GREEN = discord.Colour.from_rgb(*T.GREEN)
+_RED = discord.Colour.from_rgb(*T.RED)
+_BRASS = discord.Colour.from_rgb(*T.BRASS)
 UNREACHABLE_MSG = ("I couldn't reach api.deadlock-api.com (network or DNS problem on the bot's computer). "
                    "Check the internet connection and try again in a minute.")
 _SHORT_MODE = {"ranked": "Ranked", "brawl": "Brawl", "bot": "Bot", "standard": "Standard"}
@@ -64,6 +73,12 @@ class StatsBot(discord.Client):
         self.patch_cooldown: dict[int, float] = {}  # channel id -> last manual /patchnotes post
         self.waits: dict[tuple, int] = defaultdict(int)  # (user, guild, match) -> cycles waited for items
         self.session: aiohttp.ClientSession | None = None
+        self.started_at = time.time()
+        self.last_match_poll: float | None = None
+        self.last_match_poll_ok: bool | None = None
+        self.last_patch_poll: float | None = None
+        self.last_patch_poll_ok: bool | None = None
+        self._refresh_at: dict[int, float] = {}  # message id -> last Refresh click
 
     async def setup_hook(self):
         log.info("starting — build %s", os.getenv("BUILD_SHA", "dev"))
@@ -79,6 +94,7 @@ class StatsBot(discord.Client):
         if not self.sl.enabled:
             log.warning("STATLOCKER_API_KEY not set: cards will show match data only.")
         await self.tree.sync()
+        self.add_view(MatchRefreshView(self))  # static custom_id: works on every card, old or new
         self.poll_matches.change_interval(seconds=self.poll_seconds)
         self.poll_matches.start()
         self.poll_patches.change_interval(seconds=self.patch_poll_seconds)
@@ -264,6 +280,57 @@ class StatsBot(discord.Client):
             statlocker=bool(profile or lobby),
         ))
 
+    # --- match cards ---------------------------------------------------------
+    async def post_match_card(self, target, account_id: int, m: Match, *,
+                              display_name: str | None = None,
+                              track: tuple[int, int] | None = None,
+                              content: str | None = None) -> discord.Message:
+        """Send a match card with its Refresh button and remember where it went.
+
+        `target` is a channel or an interaction followup (both expose `.send`).
+        """
+        png = await self.render_match(account_id, m, fallback_name=display_name, track=track)
+        msg = await target.send(
+            content=content,
+            file=discord.File(png, filename=f"match_{m.match_id}.png"),
+            view=MatchRefreshView(self),
+            allowed_mentions=discord.AllowedMentions.none())
+        self.db.save_match_post(msg.id, account_id, m.match_id, display_name, int(time.time()))
+        return msg
+
+    async def refresh_match_card(self, interaction: discord.Interaction) -> None:
+        """Re-render a posted match card from fresh data (e.g. items now available)."""
+        row = self.db.get_match_post(interaction.message.id)
+        if row is None:
+            return await interaction.response.send_message(
+                "This card isn't tracked for refresh.", ephemeral=True)
+        now = time.monotonic()
+        wait = REFRESH_COOLDOWN - (now - self._refresh_at.get(row["message_id"], 0.0))
+        if wait > 0:
+            return await interaction.response.send_message(
+                f"I just refreshed this card. Try again in {int(wait) + 1}s.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            history = await self.dl.match_history(row["account_id"])
+            base = next((m for m in history if m.match_id == row["match_id"]), None)
+            if base is None:
+                return await interaction.followup.send(
+                    "I can't find that match any more, so there's nothing to refresh.", ephemeral=True)
+            # shortcut: refresh drops the one-time PP delta; add a stored baseline if that matters.
+            # track=None: refreshing must not move the PP baseline a second time.
+            png = await self.render_match(row["account_id"], await self.load_match(row["account_id"], base),
+                                          fallback_name=row["display_name"])
+            await interaction.message.edit(
+                attachments=[discord.File(png, filename=f"match_{row['match_id']}.png")])
+            self._refresh_at[row["message_id"]] = time.monotonic()
+            await interaction.followup.send("Refreshed.", ephemeral=True)
+        except (discord.NotFound, discord.Forbidden):
+            await interaction.followup.send(
+                "I can't edit that card any more (the message or channel is gone, or I lost permission).",
+                ephemeral=True)
+        except ApiUnavailable:
+            await interaction.followup.send(UNREACHABLE_MSG, ephemeral=True)
+
     # --- patch notes ---------------------------------------------------------
     async def fetch_patch_notes(self):
         heroes = await self.dl.heroes()
@@ -282,9 +349,13 @@ class StatsBot(discord.Client):
         histories: dict[int, list[Match]] = {}  # one fetch per account per cycle
         links = self.db.all_links()
         log.info("poll cycle: checking %d linked account(s)", len(links))
+        self.last_match_poll = time.time()
+        self.last_match_poll_ok = True
         for link in links:
             try:
-                channel_id = self.db.get_channel(link.guild_id)
+                if link.paused:
+                    continue
+                channel_id = self.db.get_settings(link.guild_id).channel_for("matches")
                 if channel_id is None:
                     log.info("skip account %s: no channel set for guild %s (run /setchannel)",
                             link.account_id, link.guild_id)
@@ -319,18 +390,18 @@ class StatsBot(discord.Client):
                         steam = await self.dl.steam_profile(link.account_id)
                         poster_name = steam.name if steam else None
                     poster_name = poster_name or f"Account {link.account_id}"
-                    await channel.send(
-                        content=f"**{poster_name}** just finished a match",
-                        file=discord.File(await self.render_match(link.account_id, full, link.display_name,
-                                                                   track=(link.discord_id, link.guild_id)),
-                                          filename=f"match_{m.match_id}.png"),
-                        allowed_mentions=discord.AllowedMentions.none())
+                    await self.post_match_card(
+                        channel, link.account_id, full, display_name=poster_name,
+                        track=(link.discord_id, link.guild_id),
+                        content=f"**{poster_name}** just finished a match")
                     last_posted = m.match_id
                 if last_posted:  # skipped older matches (beyond the cap) are not revisited
                     self.db.update_last_match(link.discord_id, link.guild_id, last_posted)
             except ApiUnavailable:
+                self.last_match_poll_ok = False
                 log.warning("poll skipped for account %s: match-history API unreachable", link.account_id)
             except Exception:
+                self.last_match_poll_ok = False
                 log.exception("poll failed for link %s", link)
 
     @poll_matches.before_loop
@@ -339,13 +410,17 @@ class StatsBot(discord.Client):
 
     @tasks.loop(seconds=600)
     async def poll_patches(self):
-        channels = dict(self.db.all_channels())  # guild id -> channel id
-        if not channels:  # nobody has run /setchannel yet: don't touch the feed
+        self.last_patch_poll = time.time()
+        self.last_patch_poll_ok = True
+        channels = {s.guild_id: c for s in self.db.all_settings()
+                    if (c := s.channel_for("patches"))}  # patch channel, else match channel
+        if not channels:  # nobody has configured a channel yet: don't touch the feed
             return
         states = {state.guild_id: state for state in self.db.all_patch_channels()}
         try:
             notes = await self.fetch_patch_notes()
         except Exception:
+            self.last_patch_poll_ok = False
             log.exception("patch poll: could not read the Steam news feed")
             return
         if not notes:
@@ -385,6 +460,7 @@ class StatsBot(discord.Client):
                     log.info("patch poll: posted %r to guild %s", note.title, guild_id)
                     await asyncio.sleep(1)
             except Exception:
+                self.last_patch_poll_ok = False
                 log.exception("patch poll failed for guild %s", guild_id)
 
     @poll_patches.before_loop
@@ -465,6 +541,7 @@ async def link(interaction: discord.Interaction, steamid: str, name: str | None 
     await interaction.response.defer(ephemeral=True)
     msg = await _save_account(interaction, steamid, name)
     if msg is not STEAM_INPUT_HELP:
+        bot.db.set_paused(interaction.user.id, interaction.guild_id, False)  # /link always resumes
         channel_id = bot.db.get_channel(interaction.guild_id)
         msg += (f" New matches will be posted in <#{channel_id}>." if channel_id
                 else " An admin still needs to run `/setchannel` so I know where to post.")
@@ -476,6 +553,40 @@ async def link(interaction: discord.Interaction, steamid: str, name: str | None 
 async def unlink(interaction: discord.Interaction):
     removed = bot.db.delete_link(interaction.user.id, interaction.guild_id)
     await interaction.response.send_message("Unlinked." if removed else "You weren't linked.", ephemeral=True)
+
+
+@bot.tree.command(name="pause", description="Stop automatic match posts without unlinking your account")
+@app_commands.guild_only()
+async def pause(interaction: discord.Interaction):
+    if not bot.db.set_paused(interaction.user.id, interaction.guild_id, True):
+        return await interaction.response.send_message(
+            "You're not linked here. Run `/link` first.", ephemeral=True)
+    await interaction.response.send_message(
+        "Automatic match posts are paused. `/stats` and `/latestmatch` still work.", ephemeral=True)
+
+
+@bot.tree.command(name="resume", description="Start automatic match posts again")
+@app_commands.guild_only()
+async def resume(interaction: discord.Interaction):
+    link = bot.db.get_link(interaction.user.id, interaction.guild_id)
+    if link is None:
+        return await interaction.response.send_message(
+            "You're not linked here. Run `/link` first.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    # Move the baseline to the newest match first, so resuming does not post a backlog.
+    # shortcut: no queued backlog; if the fetch fails, MAX_AUTOPOST_PER_CYCLE caps the catch-up.
+    try:
+        history = await bot.dl.match_history(link.account_id)
+    except ApiUnavailable:
+        history = None
+    if history:
+        bot.db.update_last_match(interaction.user.id, interaction.guild_id, history[0].match_id)
+    bot.db.set_paused(interaction.user.id, interaction.guild_id, False)
+    msg = "Automatic match posts are back on."
+    if history is None:
+        msg += (" I couldn't refresh your baseline, so I'll post at most "
+                f"{MAX_AUTOPOST_PER_CYCLE} recent matches.")
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 async def _enable_patch_notes(interaction: discord.Interaction, channel, channel_changed: bool):
@@ -519,10 +630,170 @@ async def setchannel(interaction: discord.Interaction, channel: discord.TextChan
     # otherwise Discord times the interaction out.
     await interaction.response.defer()
     extra = await _enable_patch_notes(interaction, channel, previous != channel.id)
-    msg = f"Match cards and patch notes will be posted in {channel.mention}."
+    msg = f"Match cards will be posted in {channel.mention}."
+    if not bot.db.get_settings(interaction.guild_id).patch_channel_id:
+        msg += " Patch notes use the same channel; `/settings channel feature:patches` gives them their own."
     if extra:
         msg += " " + extra
     await interaction.followup.send(msg)
+
+
+settings = app_commands.Group(name="settings", description="Route match cards and patch notes",
+                              default_permissions=discord.Permissions(manage_guild=True),
+                              guild_only=True)
+
+
+def _channel_text(channel_id: int | None, fallback: int | None = None) -> str:
+    if channel_id:
+        return f"<#{channel_id}>"
+    return f"<#{fallback}> (fallback)" if fallback else "not set"
+
+
+@settings.command(name="show", description="Show where match cards and patch notes are posted")
+async def settings_show(interaction: discord.Interaction):
+    s = bot.db.get_settings(interaction.guild_id)
+    embed = discord.Embed(title="Settings", colour=_BRASS)
+    embed.add_field(name="Match cards",
+                    value=_channel_text(s.match_channel_id), inline=False)
+    embed.add_field(name="Patch notes",
+                    value=_channel_text(s.patch_channel_id, s.match_channel_id), inline=False)
+    embed.set_footer(text="/settings channel sets one feature; leave the channel empty to fall back")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@settings.command(name="channel", description="Choose the channel for match cards or patch notes")
+@app_commands.describe(feature="Which posts to route", channel="Leave empty to fall back to the match channel")
+@app_commands.choices(feature=[app_commands.Choice(name="Match cards", value="matches"),
+                               app_commands.Choice(name="Patch notes", value="patches")])
+async def settings_channel(interaction: discord.Interaction,
+                           feature: app_commands.Choice[str],
+                           channel: discord.TextChannel | None = None):
+    if channel is None:
+        bot.db.set_feature_channel(interaction.guild_id, feature.value, None)
+        effective = bot.db.get_settings(interaction.guild_id).channel_for(feature.value)
+        where = f"<#{effective}>" if effective else "no channel yet (set one with `/setchannel`)"
+        return await interaction.response.send_message(
+            f"{feature.name} now go to {where}.", ephemeral=True)
+    perms = channel.permissions_for(interaction.guild.me)
+    if not perms.send_messages or (feature.value == "matches" and not perms.attach_files):
+        need = "Send Messages and Attach Files" if feature.value == "matches" else "Send Messages"
+        return await interaction.response.send_message(
+            f"I need {need} in {channel.mention}.", ephemeral=True)
+    bot.db.set_feature_channel(interaction.guild_id, feature.value, channel.id)
+    await interaction.response.send_message(
+        f"{feature.name} will be posted in {channel.mention}.", ephemeral=True)
+
+
+bot.tree.add_command(settings)
+
+
+@bot.tree.context_menu(name="Deadlock stats")
+@app_commands.guild_only()
+async def user_stats(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    link = bot.db.get_link(user.id, interaction.guild_id or 0)
+    if link is None:
+        return await interaction.followup.send(
+            f"{user.display_name} hasn't linked a Steam account in this server.", ephemeral=True)
+    png = await bot.build_stats_card(link.account_id, fallback_name=link.display_name)
+    if png is None:
+        return await interaction.followup.send("No data found for that account.", ephemeral=True)
+    await interaction.followup.send(file=discord.File(png, filename="stats.png"), ephemeral=True)
+
+
+@bot.tree.context_menu(name="Deadlock lookup")
+async def message_lookup(interaction: discord.Interaction, message: discord.Message):
+    acc = find_steam_input(message.content)
+    if acc is None:
+        return await interaction.response.send_message(
+            "I couldn't find a Steam ID in that message.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    png = await bot.build_stats_card(acc)
+    if png is None:
+        return await interaction.followup.send("No data found for that account.", ephemeral=True)
+    await interaction.followup.send(file=discord.File(png, filename="stats.png"), ephemeral=True)
+
+
+def _ago(ts: float | None) -> str:
+    return f"<t:{int(ts)}:R>" if ts else "never"
+
+
+@bot.tree.command(name="help", description="What this bot can do")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Deadlock stats", colour=_GREEN,
+        description="Stats and match cards for Deadlock, plus automatic post-game cards.")
+    embed.add_field(
+        name="Account",
+        value="`/link` link Steam and turn on automatic match posts\n"
+              "`/save` save Steam without auto-posting\n"
+              "`/unlink` forget the account\n"
+              "`/pause` / `/resume` stop or restart auto-posting", inline=False)
+    embed.add_field(
+        name="Stats",
+        value="`/stats`, `/latestmatch`, `/matches`, `/matchstatus`\n"
+              "Right-click a user → **Deadlock stats**, or a message with a Steam ID → "
+              "**Deadlock lookup**.", inline=False)
+    embed.add_field(
+        name="Patches",
+        value="`/patchnotes` posts the latest Steam patch notes; a new patch is also posted "
+              "automatically. **Hero Changes** on a note lists what changed per hero.", inline=False)
+    embed.add_field(
+        name="Server admin",
+        value="`/setchannel` sets the match-card channel\n"
+              "`/settings show` shows both channels\n"
+              "`/settings channel` routes match cards or patch notes separately", inline=False)
+    embed.add_field(
+        name="Other",
+        value="**Refresh** under a match card re-renders it with newer data\n"
+              "`/status` bot and API health · `/invite` add the bot to another server", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="status", description="Bot and Deadlock API health")
+async def status(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    api_status, health = await bot.dl.health()
+    services = (health or {}).get("services") or {}
+    api_text = "unreachable" if api_status is None else f"HTTP {api_status}"
+    if services:
+        api_text += " · " + " · ".join(
+            f"{name} {'✅' if ok else '❌'}" for name, ok in services.items())
+    links = bot.db.all_links()
+    embed = discord.Embed(title="Status", colour=_GREEN if api_status == 200 else _RED)
+    embed.add_field(name="Bot", value=(
+        f"uptime {_fmt_duration(int(time.time() - bot.started_at))}\n"
+        f"latency {bot.latency * 1000:.0f} ms · build `{os.getenv('BUILD_SHA', 'dev')}`\n"
+        f"{len(bot.guilds)} server(s)"), inline=True)
+    embed.add_field(name="Matches", value=(
+        f"{len(links)} linked · {bot.db.count_paused_links()} paused\n"
+        f"last poll {_ago(bot.last_match_poll)} "
+        f"{'✅' if bot.last_match_poll_ok else '⚠️' if bot.last_match_poll_ok is False else ''}\n"
+        f"{bot.db.count_match_posts()} tracked card(s)"), inline=True)
+    embed.add_field(name="Patches", value=(
+        f"last poll {_ago(bot.last_patch_poll)} "
+        f"{'✅' if bot.last_patch_poll_ok else '⚠️' if bot.last_patch_poll_ok is False else ''}\n"
+        f"{len(bot.db.all_patch_notes())} stored note(s)"), inline=True)
+    embed.add_field(name="Deadlock API", value=api_text, inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="invite", description="Get a link to add this bot to your server")
+async def invite(interaction: discord.Interaction):
+    url = discord.utils.oauth_url(
+        bot.user.id,
+        permissions=discord.Permissions(
+            view_channel=True, send_messages=True, send_messages_in_threads=True,
+            create_public_threads=True, embed_links=True, attach_files=True,
+            read_message_history=True),
+        scopes=("bot", "applications.commands"))
+    embed = discord.Embed(
+        title="Add Deadlock stats to your server", colour=_GREEN,
+        description="Needs Send Messages and Attach Files to post cards, and Manage Server to "
+                    "run `/settings`.")
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Add to server", url=url))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @bot.tree.command(name="patchnotes", description="Post the latest Deadlock patch notes from Steam")
@@ -603,8 +874,8 @@ async def latestmatch(interaction: discord.Interaction, steamid: str | None = No
     if not history:
         return await interaction.followup.send("No matches found for that account.")
     track = (interaction.user.id, interaction.guild_id) if steamid is None else None  # never track on someone else's card
-    png = await bot.render_match(acc, await bot.load_match(acc, history[0]), fallback_name=name, track=track)
-    await interaction.followup.send(file=discord.File(png, filename="latest_match.png"))
+    await bot.post_match_card(interaction.followup, acc, await bot.load_match(acc, history[0]),
+                              display_name=name, track=track)
 
 
 _VERDICT_COLOURS = {"full": 0x3FB950, "partial": 0xD29922, "queued": 0xD29922,

@@ -39,13 +39,13 @@ class DeadlockAPI:
         self._recent: tuple[float, set[int]] | None = None
 
     async def _request(self, url: str, params: dict | None = None, retries: int = 2,
-                       critical: bool = False) -> tuple[int | None, object | None]:
+                       critical: bool = False, timeout: float = 20) -> tuple[int | None, object | None]:
         """GET + decode JSON. Returns (status, data); status is None when no response
         arrived (network/DNS/timeout). Raises ApiUnavailable when `critical`."""
         try:
             for attempt in range(retries + 1):
                 async with self.session.get(url, params=params, headers=self.headers,
-                                            timeout=aiohttp.ClientTimeout(total=20)) as r:
+                                            timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                     if r.status == 429 and attempt < retries:
                         await asyncio.sleep(min(float(r.headers.get("Retry-After", 2 * (attempt + 1))), 30))
                         continue
@@ -197,6 +197,11 @@ class DeadlockAPI:
         status, data = await self._request(f"{BASE}/v1/matches/{match_id}/salts",
                                            {"disable_steam": "true"}, retries=1)
         return status, parse_salts(data) if status == 200 else None
+
+    async def health(self, timeout: float = 5.0) -> tuple[int | None, dict | None]:
+        """Service health for /status. (status, {"services": {...}}); status None = unreachable."""
+        status, data = await self._request(f"{BASE}/v1/info/health", retries=0, timeout=timeout)
+        return status, data if isinstance(data, dict) else None
 
     async def recently_fetched_ids(self) -> set[int] | None:
         """Matches fetched in the last 10 minutes (~1 MB), cached briefly."""

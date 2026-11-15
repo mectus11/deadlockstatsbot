@@ -33,6 +33,27 @@ def parse_steam_input(text: str) -> int | None:
     return None
 
 
+def find_steam_input(text: str) -> int | None:
+    """First Steam account ID found in free text (a Discord message), or None.
+
+    Only unambiguous forms are accepted: a whole Steam64/account ID/profile link,
+    [U:1:...], a profile URL, or a 17-digit Steam64 token. Random numbers in prose
+    are ignored.
+    """
+    text = (text or "").strip()
+    if (acc := parse_steam_input(text)) is not None:
+        return acc
+    if m := re.search(r"\[U:1:(\d+)\]", text):
+        return int(m.group(1))
+    if m := re.search(r"steamcommunity\.com/profiles/(\d{17})", text):
+        return parse_steam_input(m.group(1))
+    for token in text.split():
+        token = token.strip("<>(),.;:!?\"'")
+        if re.fullmatch(r"7656119\d{10}", token):
+            return parse_steam_input(token)
+    return None
+
+
 def account_to_steam64(account_id: int) -> int:
     return account_id + STEAM64_BASE
 

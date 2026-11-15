@@ -61,8 +61,18 @@ Match cards also cover the less ordinary games — Street Brawl shows the round 
 | `/matches [steamid] [count]` | Compact list of recent matches: result, hero, mode, KDA (default 10). |
 | `/matchstatus [match_id]` | Checks whether the Deadlock API has ingested a match: scoreboard, metadata, salts, or still queued. Defaults to your latest match. |
 | `/patchnotes [count]` | Posts the latest Deadlock patch notes from Steam (default 1, max 3) with a Steam link and a Hero Changes button. |
-| `/setchannel [channel]` | (Admins) Channel for automatic match cards **and patch notes**. Defaults to the current one. |
+| `/pause` / `/resume` | Stops or restarts automatic match posts without unlinking. `/resume` skips the backlog. |
+| `/setchannel [channel]` | (Admins) Channel for automatic match cards; patch notes follow it unless routed elsewhere. Defaults to the current one. |
+| `/settings show` | (Admins) Shows the match-card and patch-note channels. |
+| `/settings channel feature:<matches\|patches> [channel]` | (Admins) Routes one feature; leave the channel empty to fall back to the match channel. |
+| `/status` | Bot uptime, latency, build, linked/paused counts, last polls, Deadlock API health. |
+| `/invite` | Link to add the bot to another server. |
+| `/help` | Command summary. |
 | `/unlink` | Forgets your saved account and stops automatic posts for you. |
+
+Right-click a user → **Deadlock stats** for their saved account, or right-click a message containing a Steam ID →
+**Deadlock lookup**. Both reply privately. Every match card has a **Refresh** button that re-renders it with newer
+data (useful when it was posted before item data arrived).
 
 `steamid` can be a SteamID64 (17 digits), a 32-bit account ID, or a `steamcommunity.com/profiles/...` link
 (custom `/id/name` links can't be resolved). Leave it empty to use your saved account. `name` is optional; if you
@@ -75,7 +85,8 @@ An admin runs `/setchannel` once, then everyone who wants automatic cards uses `
 
 The bot checks every `POLL_SECONDS` (default 120). `/link` records your latest match as a baseline, so only newer
 matches are posted; at most 3 per cycle. Item data can lag a match by a few minutes, so a new match waits up to 5
-cycles for it before being posted without items.
+cycles for it before being posted without items. `/pause` stops your posts; `/resume` moves the baseline to the newest
+match first, so a long pause does not flood the channel.
 
 Match cards also show a **PARTY** panel with the mates you queued with. The API has no exact party field, so this uses
 its `same_party` heuristic (same team plus Steam friends at match start). It can miss a non-friend party member or
@@ -85,7 +96,7 @@ unchanged.
 ## Patch notes
 
 The bot watches Steam's Deadlock news feed every `PATCH_POLL_SECONDS` (default 600, minimum 300) and posts new notes in
-the `/setchannel` channel as a normal message (not an embed), with a **Steam Patch Notes** link button and a
+the match channel — or a separate patch channel set with `/settings channel feature:patches` — as a normal message (not an embed), with a **Steam Patch Notes** link button and a
 **Hero Changes** button when the patch touches heroes. That button opens a private, paginated hero picker showing only
 the lines for the hero you choose.
 
@@ -156,6 +167,7 @@ tests and the Steam patch-note tests. `python preview_cards.py` renders sample c
 
 Files: `bot.py` commands + pollers · `cards.py` image cards · `deadlock_api.py` / `statlocker.py` API clients ·
 `models.py` parsing · `steam_news.py` Steam patch-note parsing · `patchnote_views.py` patch-note buttons ·
+`card_views.py` match-card Refresh button ·
 `images.py` download cache · `stats.py` aggregates · `steam.py` ID parsing · `db.py` storage · `probe.py` live-data
 check.
 

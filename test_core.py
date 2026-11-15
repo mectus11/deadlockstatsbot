@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 import tempfile
 import types
@@ -17,7 +18,7 @@ from models import (BrawlRound, ItemBuy, Match, MatchStats, SteamProfile, final_
                     parse_steam_profile, parse_steam_profiles, pick_image, resolve_identity)
 from statlocker import parse_lobby, parse_profile, rank_badge_url, rank_name
 from stats import compute_overall
-from steam import account_to_steam64, parse_steam_input
+from steam import account_to_steam64, find_steam_input, parse_steam_input
 
 
 class SteamIds(unittest.TestCase):
@@ -33,6 +34,13 @@ class SteamIds(unittest.TestCase):
     def test_rejects(self):
         for bad in ["", "gabelogannewell", "https://steamcommunity.com/id/gabe", "0", "-5"]:
             self.assertIsNone(parse_steam_input(bad), bad)
+
+    def test_find_in_message(self):
+        self.assertEqual(find_steam_input("<https://steamcommunity.com/profiles/76561197960435530>"), 169802)
+        self.assertEqual(find_steam_input("add me [U:1:169802] thanks"), 169802)
+        self.assertEqual(find_steam_input("my id is 76561197960435530."), 169802)
+        self.assertIsNone(find_steam_input("I got 169802 souls and 765 kills"))
+        self.assertIsNone(find_steam_input(""))
 
 
 class Normalize(unittest.TestCase):
@@ -353,6 +361,52 @@ class Database(unittest.TestCase):
             self.assertEqual((db.get_link(1, 10).last_pp_score, db.get_link(1, 10).last_rank_number), (4250, 84))
             self.assertTrue(db.delete_link(1, 10))
             self.assertFalse(db.delete_link(1, 10))
+            db.conn.close()
+
+    def test_guild_settings_and_legacy_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "old.db")
+            old = sqlite3.connect(path)
+            old.execute("CREATE TABLE channels (guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL)")
+            old.execute("INSERT INTO channels VALUES (5, 77)")
+            old.commit()
+            old.close()
+
+            db = DB(path)
+            s = db.get_settings(5)
+            self.assertEqual(s.match_channel_id, 77)          # migrated from `channels`
+            self.assertIsNone(s.patch_channel_id)
+            self.assertEqual(s.channel_for("matches"), 77)
+            self.assertEqual(s.channel_for("patches"), 77)    # fallback
+            db.set_feature_channel(5, "patches", 88)
+            self.assertEqual(db.get_settings(5).channel_for("patches"), 88)
+            self.assertEqual(db.all_channels(), [(5, 77)])    # legacy view still works
+            db.set_feature_channel(5, "patches", None)
+            self.assertEqual(db.get_settings(5).channel_for("patches"), 77)
+            db.set_feature_channel(5, "matches", None)   # deliberately cleared
+            db.conn.close()
+            db = DB(path)
+            self.assertIsNone(db.get_settings(5).match_channel_id)  # migration must not resurrect it
+            db.conn.close()
+
+    def test_pause_and_match_posts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DB(os.path.join(tmp, "t.db"))
+            db.set_link(1, 10, 169802, 500)
+            self.assertFalse(db.set_paused(2, 10, True))      # no link -> nothing paused
+            self.assertTrue(db.set_paused(1, 10, True))
+            self.assertEqual(db.count_paused_links(), 1)
+            db.set_link(1, 10, 169802, 600)                   # /save must not resume
+            self.assertEqual(db.get_link(1, 10).paused, 1)
+            db.set_paused(1, 10, False)
+            self.assertEqual(db.get_link(1, 10).paused, 0)
+
+            db.save_match_post(900, 169802, 600, "Fadi", 1234)
+            self.assertEqual(db.get_match_post(900)["match_id"], 600)
+            self.assertEqual(db.count_match_posts(), 1)
+            db.save_match_post(900, 169802, 601, "Fadi", 1235)  # same message re-saved
+            self.assertEqual(db.count_match_posts(), 1)
+            self.assertIsNone(db.get_match_post(901))
             db.conn.close()
 
 

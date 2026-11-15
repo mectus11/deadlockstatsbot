@@ -16,6 +16,20 @@ class Link:
     display_name: str | None = None
     last_pp_score: int | None = None
     last_rank_number: int | None = None
+    paused: int = 0
+
+
+@dataclass
+class GuildSettings:
+    guild_id: int
+    match_channel_id: int | None = None
+    patch_channel_id: int | None = None
+
+    def channel_for(self, feature: str) -> int | None:
+        """Channel for 'matches' or 'patches'; patches fall back to the match channel."""
+        if feature == "patches":
+            return self.patch_channel_id or self.match_channel_id
+        return self.match_channel_id
 
 
 @dataclass
@@ -63,6 +77,18 @@ class DB:
                 guild_id INTEGER PRIMARY KEY,
                 channel_id INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id INTEGER PRIMARY KEY,
+                match_channel_id INTEGER,
+                patch_channel_id INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS match_posts (
+                message_id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                match_id INTEGER NOT NULL,
+                display_name TEXT,
+                created_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS patch_channels (
                 guild_id INTEGER PRIMARY KEY,
                 last_guid TEXT,
@@ -80,7 +106,8 @@ class DB:
             );
             """
         )
-        for col in ("display_name TEXT", "last_pp_score INTEGER", "last_rank_number INTEGER"):
+        for col in ("display_name TEXT", "last_pp_score INTEGER", "last_rank_number INTEGER",
+                    "paused INTEGER NOT NULL DEFAULT 0"):
             try:  # migration for databases created before these columns existed
                 self.conn.execute(f"ALTER TABLE links ADD COLUMN {col}")
             except sqlite3.OperationalError:
@@ -90,6 +117,12 @@ class DB:
                 "ALTER TABLE patch_channels ADD COLUMN announced INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        # migration: guild_settings replaces `channels`; seed it once, while it is still empty
+        # (re-running would resurrect a match channel an admin deliberately cleared)
+        if not self.conn.execute("SELECT 1 FROM guild_settings LIMIT 1").fetchone():
+            self.conn.execute(
+                "INSERT OR IGNORE INTO guild_settings (guild_id, match_channel_id) "
+                "SELECT guild_id, channel_id FROM channels")
         self.conn.commit()
 
     # --- links -----------------------------------------------------------
@@ -135,24 +168,58 @@ class DB:
         )
         self.conn.commit()
 
-    # --- channels --------------------------------------------------------
-    def set_channel(self, guild_id: int, channel_id: int) -> None:
+    # --- channels / guild settings ---------------------------------------
+    def get_settings(self, guild_id: int) -> GuildSettings:
+        r = self.conn.execute(
+            "SELECT * FROM guild_settings WHERE guild_id=?", (guild_id,)
+        ).fetchone()
+        return GuildSettings(**dict(r)) if r else GuildSettings(guild_id)
+
+    def all_settings(self) -> list[GuildSettings]:
+        return [GuildSettings(**dict(r)) for r in self.conn.execute("SELECT * FROM guild_settings")]
+
+    def set_feature_channel(self, guild_id: int, feature: str, channel_id: int | None) -> None:
+        column = "patch_channel_id" if feature == "patches" else "match_channel_id"
+        self.conn.execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (guild_id,))
         self.conn.execute(
-            "INSERT INTO channels (guild_id, channel_id) VALUES (?,?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id",
-            (guild_id, channel_id),
-        )
+            f"UPDATE guild_settings SET {column}=? WHERE guild_id=?", (channel_id, guild_id))
         self.conn.commit()
 
+    def set_channel(self, guild_id: int, channel_id: int) -> None:
+        self.set_feature_channel(guild_id, "matches", channel_id)
+
     def get_channel(self, guild_id: int) -> int | None:
-        r = self.conn.execute(
-            "SELECT channel_id FROM channels WHERE guild_id=?", (guild_id,)
-        ).fetchone()
-        return r["channel_id"] if r else None
+        return self.get_settings(guild_id).match_channel_id
 
     def all_channels(self) -> list[tuple[int, int]]:
-        return [(r["guild_id"], r["channel_id"]) for r in
-                self.conn.execute("SELECT guild_id, channel_id FROM channels")]
+        return [(s.guild_id, s.match_channel_id) for s in self.all_settings()
+                if s.match_channel_id is not None]
+
+    # --- pause / match posts ---------------------------------------------
+    def set_paused(self, discord_id: int, guild_id: int, paused: bool) -> bool:
+        cur = self.conn.execute(
+            "UPDATE links SET paused=? WHERE discord_id=? AND guild_id=?",
+            (int(paused), discord_id, guild_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def count_paused_links(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM links WHERE paused=1").fetchone()[0]
+
+    def save_match_post(self, message_id: int, account_id: int, match_id: int,
+                        display_name: str | None, created_at: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO match_posts (message_id, account_id, match_id, display_name, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (message_id, account_id, match_id, display_name, created_at))
+        self.conn.commit()
+
+    def get_match_post(self, message_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM match_posts WHERE message_id=?", (message_id,)).fetchone()
+
+    def count_match_posts(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM match_posts").fetchone()[0]
 
     # --- patch notes -----------------------------------------------------
     def get_patch_channel(self, guild_id: int) -> PatchChannel | None:

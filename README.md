@@ -3,7 +3,7 @@
 </div>
 
 <p align="center">
-  <strong>Noir, art-deco match cards for Deadlock — posted to Discord automatically.</strong><br>
+  <strong>Art-deco match cards for Deadlock — posted to Discord automatically.</strong><br>
   Every item, every stat, every party member. Plus overall stats, recent-match lists and patch notes.
 </p>
 

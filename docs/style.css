@@ -1,5 +1,5 @@
 /* Deadlock Stats Bot — theme v2 website.
-   1940s New York noir, Art Deco brasswork, absinthe shadow.
+   Art Deco brasswork, absinthe shadow.
    Tokens mirror theme.py so the page and the rendered cards stay one family. */
 
 @font-face {
@@ -178,24 +178,14 @@ a:hover {
 }
 
 .brand-mark {
-  position: relative;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   flex: none;
 }
 
-.brand-mark::before,
-.brand-mark::after {
-  content: "";
-  position: absolute;
-  inset: 4px;
-  transform: rotate(45deg);
-  border: 1px solid var(--brass);
-}
-
-.brand-mark::after {
-  inset: 9px;
-  background: var(--gold);
+.footer-brand .brand-mark {
+  width: 20px;
+  height: 20px;
 }
 
 .brand-name {

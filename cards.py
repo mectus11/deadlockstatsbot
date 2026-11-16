@@ -854,6 +854,8 @@ class MatchCardData:
     own_lobby_rank: str | None = None
     enemy_lobby_rank: str | None = None
     rank_name: str | None = None        # player's own current rank (e.g. "Archon 3")
+    rank_prev: str | None = None        # rank before this match, when it moved
+    rank_up: bool | None = None         # True promoted, False demoted, None no change
     pp_score: int | None = None
     pp_delta: int | None = None         # change since the last match tracked for this player
     statlocker: bool = False
@@ -894,9 +896,12 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     x += c.tracked_text(x, 132, f"MATCH #{d.match_id}", 9.5, MUTED, True, "la", 1.8) + 14
     if d.mode:
         x += c.tag(x, 124, d.mode.upper(), MODE_COLORS.get(d.mode_kind or "", MUTED), size=9) + 8
+    if d.rank_prev:  # moved: old tag muted, new tag's colour carries the direction
+        x += c.tag(x, 124, d.rank_prev.upper(), MUTED, size=9) + 6
     if d.rank_name:
         rank_txt = d.rank_name.upper() + (f" · {d.pp_score} PP" if d.pp_score is not None else "")
-        x += c.tag(x, 124, rank_txt, BRASS, size=9) + 8
+        rank_col = BRASS if d.rank_up is None else GREEN if d.rank_up else RED
+        x += c.tag(x, 124, rank_txt, rank_col, size=9) + 8
     if d.pp_delta:
         up, col = d.pp_delta > 0, GREEN if d.pp_delta > 0 else RED
         c.tri(x + 6, 130, 9, up, col)

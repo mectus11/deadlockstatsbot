@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
 import aiohttp
@@ -46,6 +47,32 @@ def rank_badge_url(rank_number: int | None) -> str | None:
     return f"{IMAGE_BASE}/ranks/rank{tier}/badge_lg_subrank{sub}.webp"
 
 
+@dataclass(frozen=True)
+class RankSnapshot:
+    """PP/rank before and after the match a card shows. Stored with the card so a refresh
+    re-renders the same delta instead of dropping it, and so late data can be filled in."""
+    pp_before: int | None = None
+    pp_after: int | None = None
+    rank_before: int | None = None
+    rank_after: int | None = None
+
+    @property
+    def pp_delta(self) -> int | None:
+        if self.pp_before is None or self.pp_after is None:
+            return None
+        return self.pp_after - self.pp_before
+
+    @property
+    def rank_changed(self) -> bool:
+        return (self.rank_before is not None and self.rank_after is not None
+                and self.rank_before != self.rank_after)
+
+    @property
+    def promoted(self) -> bool:
+        """A real promotion, not a first-ever rank: both sides must be known."""
+        return self.rank_changed and self.rank_after > self.rank_before
+
+
 @dataclass
 class Profile:
     name: str | None
@@ -60,6 +87,29 @@ class LobbyInfo:
     own_rank: int | None
     enemy_rank: int | None
 
+
+def _ago(ts: float) -> str:
+    secs = max(0, int(time.time() - ts))
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60} min ago"
+    if secs < 86400:
+        return f"{secs // 3600} h ago"
+    return f"{secs // 86400} d ago"
+
+
+def format_top(entries: list[tuple[str, "Profile | None"]],
+               limit: int = 10) -> tuple[str, int, int]:
+    """Server ladder body: `entries` are (already escaped display name, profile).
+    Returns (description, number shown, number without PP data)."""
+    ranked = sorted(((name, p) for name, p in entries if p and p.pp_score is not None),
+                    key=lambda np: (-np[1].pp_score, -(np[1].rank_number or 0), np[0].lower()))
+    unranked = len(entries) - len(ranked)
+    shown = ranked[:limit]
+    lines = [f"{i}. **{name}** — {rank_name(p.rank_number) or 'unranked'} · {p.pp_score} PP"
+             for i, (name, p) in enumerate(shown, 1)]
+    return "\n".join(lines), len(shown), unranked
 
 def parse_profile(d: dict) -> Profile:
     """Prefer the live Season 1 ladders (docs: always use the returned
@@ -94,14 +144,33 @@ class StatlockerAPI:
     def __init__(self, session: aiohttp.ClientSession, api_key: str | None):
         self.session = session
         self.api_key = api_key
+        self.last_status: int | None = None  # HTTP status of the last call; None = never/network
+        self.last_status_at: float | None = None
+        self.calls = 0
 
     @property
     def enabled(self) -> bool:
         return bool(self.api_key)
 
+    def status_text(self) -> str:
+        """One line for /status; never includes the key itself."""
+        if not self.enabled:
+            return "not configured (no `STATLOCKER_API_KEY`)"
+        if self.last_status_at is None:
+            return "key set · no calls yet"
+        when = _ago(self.last_status_at)
+        if self.last_status == 200:
+            return f"OK · last call {when}"
+        if self.last_status in (401, 403):
+            return f"key rejected (HTTP {self.last_status}) · {when}"
+        if self.last_status is None:
+            return f"unreachable · {when}"
+        return f"HTTP {self.last_status} · {when}"
+
     async def _get(self, path: str, retries: int = 2) -> dict | None:
         if not self.enabled:
             return None
+        self.calls += 1
         try:
             for attempt in range(retries + 1):
                 async with self.session.get(
@@ -109,6 +178,8 @@ class StatlockerAPI:
                     headers={"X-API-Key": self.api_key},
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as r:
+                    self.last_status = r.status
+                    self.last_status_at = time.time()
                     if r.status == 429 and attempt < retries:
                         await asyncio.sleep(min(float(r.headers.get("Retry-After", 5)), 30))
                         continue
@@ -120,6 +191,8 @@ class StatlockerAPI:
                         log.warning("Statlocker GET %s -> HTTP %s", path, r.status)
                     return None
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            self.last_status = None
+            self.last_status_at = time.time()
             log.warning("Could not reach Statlocker (%s): %s", path, e)
         return None
 

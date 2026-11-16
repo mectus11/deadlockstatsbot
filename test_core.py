@@ -16,7 +16,8 @@ from models import (BrawlRound, ItemBuy, Match, MatchStats, SteamProfile, final_
                     ingest_verdict, match_type, mate_ids, merge_match, normalize_entry,
                     normalize_metadata, parse_assets, parse_match_info, parse_salts,
                     parse_steam_profile, parse_steam_profiles, pick_image, resolve_identity)
-from statlocker import parse_lobby, parse_profile, rank_badge_url, rank_name
+from statlocker import (RankSnapshot, format_top, parse_lobby, parse_profile, rank_badge_url,
+                        rank_name)
 from stats import compute_overall
 from steam import account_to_steam64, find_steam_input, parse_steam_input
 
@@ -409,6 +410,65 @@ class Database(unittest.TestCase):
             self.assertIsNone(db.get_match_post(901))
             db.conn.close()
 
+    def test_match_post_snapshot_and_backfill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DB(os.path.join(tmp, "t.db"))
+            db.save_match_post(900, 169802, 600, "Fadi", 1000, channel_id=55,
+                               pp_before=1000, pp_after=1038, rank_before=74, rank_after=75)
+            row = db.get_match_post(900)
+            self.assertEqual((row["channel_id"], row["pp_before"], row["pp_after"],
+                              row["rank_before"], row["rank_after"]), (55, 1000, 1038, 74, 75))
+            self.assertEqual(db.count_cards_awaiting_rank(0), 0)  # snapshot complete
+
+            db.save_match_post(901, 1, 700, "Nyx", 2000, channel_id=55)  # no rank data yet
+            self.assertEqual(db.count_cards_awaiting_rank(0), 1)
+            self.assertEqual(db.count_cards_awaiting_rank(2001), 0)  # outside the window
+            self.assertEqual([r["message_id"] for r in db.cards_awaiting_rank(0)], [901])
+            db.set_match_post_rank(901, 800, 81)
+            self.assertIsNone(db.get_match_post(901)["pp_before"])  # baseline is never invented
+            self.assertEqual(db.cards_awaiting_rank(0), [])
+
+            db.save_match_post(902, 2, 701, "Abrams", 2000, channel_id=55)
+            db.set_match_post_attempts(902, 3)  # gave up
+            self.assertEqual(db.cards_awaiting_rank(0), [])
+            self.assertEqual(db.count_cards_awaiting_rank(0), 0)
+
+            # only the newest match per account is eligible, so its delta has a real baseline
+            db.save_match_post(903, 3, 710, "Haze", 3000, channel_id=55)
+            db.save_match_post(904, 3, 711, "Haze", 3001, channel_id=55)
+            self.assertEqual([r["message_id"] for r in db.cards_awaiting_rank(0)], [904])
+            db.conn.close()
+
+    def test_migrates_old_match_posts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.db")
+            conn = sqlite3.connect(path)  # the schema from before the snapshot columns
+            conn.execute(
+                "CREATE TABLE match_posts (message_id INTEGER PRIMARY KEY, account_id INTEGER "
+                "NOT NULL, match_id INTEGER NOT NULL, display_name TEXT, created_at INTEGER NOT NULL)")
+            conn.commit()
+            conn.close()
+            db = DB(path)
+            db.save_match_post(1, 1, 1, None, 1, channel_id=2, pp_after=3)
+            row = db.get_match_post(1)
+            self.assertEqual((row["pp_after"], row["backfill_attempts"]), (3, 0))
+            db.conn.close()
+
+    def test_links_for_guild_and_baseline_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DB(os.path.join(tmp, "t.db"))
+            db.set_link(1, 10, 169802, 500)
+            db.set_link(2, 10, 1, 1)
+            db.set_link(3, 20, 2, 1)
+            self.assertEqual({l.discord_id for l in db.links_for_guild(10)}, {1, 2})
+            db.set_rank_baseline(1, 10, 5000, 74)
+            db.set_link(1, 10, 169802, 600)  # same account: baseline kept
+            self.assertEqual(db.get_link(1, 10).last_pp_score, 5000)
+            db.set_link(1, 10, 999, 1)       # a different account must not inherit it
+            self.assertIsNone(db.get_link(1, 10).last_pp_score)
+            self.assertIsNone(db.get_link(1, 10).last_rank_number)
+            db.conn.close()
+
 
 class MatchesCard(unittest.TestCase):
     def test_renders_without_error(self):
@@ -501,6 +561,52 @@ class MetadataStats(unittest.TestCase):
         self.assertEqual(len(merged.brawl_rounds), 1)                    # empty base list doesn't shadow it
 
 
+class RankSnapshotTests(unittest.TestCase):
+    def test_delta_and_promotion(self):
+        snap = RankSnapshot(pp_before=1000, pp_after=1038, rank_before=74, rank_after=75)
+        self.assertEqual(snap.pp_delta, 38)
+        self.assertTrue(snap.rank_changed)
+        self.assertTrue(snap.promoted)
+        demoted = RankSnapshot(1000, 960, 75, 74)
+        self.assertEqual(demoted.pp_delta, -40)
+        self.assertFalse(demoted.promoted)
+        same = RankSnapshot(1000, 1010, 74, 74)
+        self.assertFalse(same.rank_changed)
+        self.assertFalse(same.promoted)
+
+    def test_missing_side_means_no_claim(self):
+        first = RankSnapshot(rank_after=74)  # no baseline yet
+        self.assertIsNone(first.pp_delta)
+        self.assertFalse(first.rank_changed)
+        self.assertFalse(first.promoted)
+        self.assertEqual(RankSnapshot(1000, 1000).pp_delta, 0)  # no change, but known
+
+    def test_big_jump_still_one_promotion(self):
+        snap = RankSnapshot(rank_before=84, rank_after=91)  # Oracle 4 -> Phantom 1
+        self.assertTrue(snap.promoted)
+
+
+class TopLadder(unittest.TestCase):
+    def _p(self, pp, rank):
+        from statlocker import Profile
+        return Profile("x", None, rank, "Season 1 Ranked", pp)
+
+    def test_sorts_by_pp_then_rank_then_name(self):
+        entries = [("b", self._p(1000, 50)), ("a", self._p(1000, 60)),
+                   ("c", self._p(1200, 40)), ("d", self._p(1000, 60))]
+        body, shown, unranked = format_top(entries)
+        self.assertEqual((shown, unranked), (4, 0))
+        self.assertEqual([line.split("**")[1] for line in body.splitlines()], ["c", "a", "d", "b"])
+
+    def test_truncates_and_counts_unranked(self):
+        entries = [(f"p{i}", self._p(i, 50)) for i in range(12)]
+        entries += [("nobody", None), ("fresh", self._p(None, None))]
+        body, shown, unranked = format_top(entries, limit=10)
+        self.assertEqual((shown, unranked), (10, 2))
+        self.assertEqual(len(body.splitlines()), 10)
+        self.assertIn("p11", body.splitlines()[0])  # highest PP first
+
+
 class MatchCardStats(unittest.TestCase):
     def _card(self, **kw):
         import cards
@@ -522,6 +628,14 @@ class MatchCardStats(unittest.TestCase):
     def test_renders_without_stats(self):
         png = self._card()  # old payload: no stats, no mode
         self.assertGreater(len(png.getvalue()), 0)
+
+    def test_renders_rank_transition(self):
+        png = self._card(rank_name="Phantom 1", rank_prev="Oracle 4", rank_up=True,
+                         pp_score=1038, pp_delta=38)
+        self.assertGreater(len(png.getvalue()), 0)
+        demoted = self._card(rank_name="Oracle 4", rank_prev="Oracle 5", rank_up=False,
+                             pp_score=900, pp_delta=-40)
+        self.assertGreater(len(demoted.getvalue()), 0)
 
     def test_renders_party_panel(self):
         import cards

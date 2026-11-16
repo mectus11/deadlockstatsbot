@@ -15,6 +15,7 @@ Commands
   /help, /status, /invite  command help, bot/API health, and the bot's invite link
 """
 import asyncio
+import io
 import logging
 import os
 import time
@@ -28,14 +29,14 @@ from dotenv import load_dotenv
 
 import cards
 import theme as T
-from card_views import MatchRefreshView
 from db import DB
 from deadlock_api import ApiUnavailable, DeadlockAPI
 from images import ImageStore
 from local_icons import LocalIcons
 from models import Match, ingest_verdict, match_type, merge_match, resolve_identity
 from patchnote_views import HeroChangesView, PatchNoteView
-from statlocker import StatlockerAPI, rank_badge_url, rank_name
+from statlocker import (Profile, RankSnapshot, StatlockerAPI, format_top, rank_badge_url,
+                        rank_name)
 from stats import compute_overall
 from steam import STEAM_INPUT_HELP, find_steam_input, parse_steam_input
 from steam_news import fetch_feed, find_new_notes, is_patch_note, render_patch_content
@@ -48,7 +49,10 @@ SHOP_SLOTS = {"weapon", "vitality", "spirit"}  # excludes hero ability upgrades,
 MAX_AUTOPOST_PER_CYCLE = 3  # per player, so a long gap never floods the channel
 MAX_WAIT_FOR_ITEMS = 5      # poll cycles to wait for a match's item data before posting without it
 PATCH_COOLDOWN = 30         # seconds between manual /patchnotes posts in the same channel
-REFRESH_COOLDOWN = 10       # seconds between Refresh clicks on the same match card
+# shortcut: backfill covers the newest match per account for 12 h, 3 tries; raise if Statlocker lags longer
+BACKFILL_WINDOW = 12 * 3600
+BACKFILL_ATTEMPTS = 3
+BACKFILL_PER_CYCLE = 3
 _GREEN = discord.Colour.from_rgb(*T.GREEN)
 _RED = discord.Colour.from_rgb(*T.RED)
 _BRASS = discord.Colour.from_rgb(*T.BRASS)
@@ -78,7 +82,7 @@ class StatsBot(discord.Client):
         self.last_match_poll_ok: bool | None = None
         self.last_patch_poll: float | None = None
         self.last_patch_poll_ok: bool | None = None
-        self._refresh_at: dict[int, float] = {}  # message id -> last Refresh click
+        self._profiles: dict[int, tuple[float, Profile | None]] = {}  # /top cache: account -> (at, profile)
 
     async def setup_hook(self):
         log.info("starting — build %s", os.getenv("BUILD_SHA", "dev"))
@@ -94,11 +98,12 @@ class StatsBot(discord.Client):
         if not self.sl.enabled:
             log.warning("STATLOCKER_API_KEY not set: cards will show match data only.")
         await self.tree.sync()
-        self.add_view(MatchRefreshView(self))  # static custom_id: works on every card, old or new
         self.poll_matches.change_interval(seconds=self.poll_seconds)
         self.poll_matches.start()
         self.poll_patches.change_interval(seconds=self.patch_poll_seconds)
         self.poll_patches.start()
+        if self.sl.enabled:
+            self.backfill_cards.start()  # only useful (and only allowed) with Statlocker access
         # Re-register the Hero Changes buttons of notes posted before this restart. The Steam
         # link button needs no handler, so only the Hero button view has to be restored.
         stored = [note for note in self.db.all_patch_notes() if note and note.heroes]
@@ -232,21 +237,43 @@ class StatsBot(discord.Client):
             ))
         return out
 
+    async def cached_profile(self, account_id: int, ttl: int = 600) -> Profile | None:
+        """Profile with a TTL cache, for /top: one ladder must not spend one API call per
+        linked player on every use. Match cards stay uncached — a stale PP would skew deltas."""
+        hit = self._profiles.get(account_id)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        profile = await self.sl.profile(account_id)
+        self._profiles[account_id] = (time.time(), profile)
+        return profile
+
     async def render_match(self, account_id: int, m: Match, fallback_name: str | None = None,
-                           track: tuple[int, int] | None = None):
-        """track=(discord_id, guild_id): compares PP to the value stored for this player's own
+                           track: tuple[int, int] | None = None,
+                           snapshot: RankSnapshot | None = None,
+                           ) -> tuple[io.BytesIO, RankSnapshot]:
+        """Render a match card and return the PP/rank snapshot it was drawn with.
+
+        track=(discord_id, guild_id): compares PP to the value stored for this player's own
         account and remembers the new one, so the next match card can show the change. Only pass
-        this for the player's own card, never someone else's steamid."""
+        this for the player's own card, never someone else's steamid.
+        snapshot: re-render with the PP/rank the card already had (Refresh, backfill); the stored
+        baseline is neither read nor written then."""
         profile, lobby, steam = await asyncio.gather(
             self.sl.profile(account_id), self.sl.lobby(m.match_id, account_id),
             self.dl.steam_profile(account_id))
         identity = resolve_identity(profile, steam, fallback_name, account_id)
-        pp_delta = None
+        snap = snapshot or RankSnapshot()
         if track and profile and profile.pp_score is not None:
             baseline = self.db.get_link(*track)
-            if baseline and baseline.last_pp_score is not None:
-                pp_delta = profile.pp_score - baseline.last_pp_score
+            if baseline:
+                snap = RankSnapshot(baseline.last_pp_score, profile.pp_score,
+                                    baseline.last_rank_number, profile.rank_number)
             self.db.set_rank_baseline(*track, profile.pp_score, profile.rank_number)
+        # Statlocker can lag a fresh match: keep what the card already showed rather than
+        # dropping its rank/PP when the profile has none yet.
+        pp_after = profile.pp_score if profile and profile.pp_score is not None else snap.pp_after
+        rank_after = profile.rank_number if profile and profile.rank_number is not None else snap.rank_after
+        snap = RankSnapshot(snap.pp_before, pp_after, snap.rank_before, rank_after)
         heroes, catalogue = await asyncio.gather(self.dl.heroes(), self.dl.items())
         hero = heroes.get(m.hero_id)
         # the items catalogue also lists hero ability upgrades (spent with ability points, not bought
@@ -274,62 +301,42 @@ class StatsBot(discord.Client):
             party=party,
             own_lobby_rank=rank_name(lobby.own_rank) if lobby else None,
             enemy_lobby_rank=rank_name(lobby.enemy_rank) if lobby else None,
-            rank_name=rank_name(profile.rank_number) if profile else None,
-            pp_score=profile.pp_score if profile else None,
-            pp_delta=pp_delta,
+            rank_name=rank_name(snap.rank_after),
+            rank_prev=rank_name(snap.rank_before) if snap.rank_changed else None,
+            rank_up=snap.promoted if snap.rank_changed else None,
+            pp_score=snap.pp_after,
+            pp_delta=snap.pp_delta,
             statlocker=bool(profile or lobby),
-        ))
+        )), snap
 
     # --- match cards ---------------------------------------------------------
     async def post_match_card(self, target, account_id: int, m: Match, *,
                               display_name: str | None = None,
                               track: tuple[int, int] | None = None,
-                              content: str | None = None) -> discord.Message:
-        """Send a match card with its Refresh button and remember where it went.
+                              content: str | None = None,
+                              announce: bool = False) -> discord.Message:
+        """Send a match card and remember where it went.
 
         `target` is a channel or an interaction followup (both expose `.send`).
+        `announce` sends a second, plain message on a promotion; only the poller sets it, so
+        a command the user ran themselves never announces.
         """
-        png = await self.render_match(account_id, m, fallback_name=display_name, track=track)
+        png, snap = await self.render_match(account_id, m, fallback_name=display_name, track=track)
         msg = await target.send(
             content=content,
             file=discord.File(png, filename=f"match_{m.match_id}.png"),
-            view=MatchRefreshView(self),
             allowed_mentions=discord.AllowedMentions.none())
-        self.db.save_match_post(msg.id, account_id, m.match_id, display_name, int(time.time()))
+        self.db.save_match_post(msg.id, account_id, m.match_id, display_name, int(time.time()),
+                                channel_id=msg.channel.id, pp_before=snap.pp_before,
+                                pp_after=snap.pp_after, rank_before=snap.rank_before,
+                                rank_after=snap.rank_after)
+        if announce and snap.promoted:
+            who = display_name or f"Account {account_id}"
+            await msg.channel.send(
+                f"**{who}** promoted to **{rank_name(snap.rank_after)}** "
+                f"(from {rank_name(snap.rank_before)})",
+                allowed_mentions=discord.AllowedMentions.none())
         return msg
-
-    async def refresh_match_card(self, interaction: discord.Interaction) -> None:
-        """Re-render a posted match card from fresh data (e.g. items now available)."""
-        row = self.db.get_match_post(interaction.message.id)
-        if row is None:
-            return await interaction.response.send_message(
-                "This card isn't tracked for refresh.", ephemeral=True)
-        now = time.monotonic()
-        wait = REFRESH_COOLDOWN - (now - self._refresh_at.get(row["message_id"], 0.0))
-        if wait > 0:
-            return await interaction.response.send_message(
-                f"I just refreshed this card. Try again in {int(wait) + 1}s.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-        try:
-            history = await self.dl.match_history(row["account_id"])
-            base = next((m for m in history if m.match_id == row["match_id"]), None)
-            if base is None:
-                return await interaction.followup.send(
-                    "I can't find that match any more, so there's nothing to refresh.", ephemeral=True)
-            # shortcut: refresh drops the one-time PP delta; add a stored baseline if that matters.
-            # track=None: refreshing must not move the PP baseline a second time.
-            png = await self.render_match(row["account_id"], await self.load_match(row["account_id"], base),
-                                          fallback_name=row["display_name"])
-            await interaction.message.edit(
-                attachments=[discord.File(png, filename=f"match_{row['match_id']}.png")])
-            self._refresh_at[row["message_id"]] = time.monotonic()
-            await interaction.followup.send("Refreshed.", ephemeral=True)
-        except (discord.NotFound, discord.Forbidden):
-            await interaction.followup.send(
-                "I can't edit that card any more (the message or channel is gone, or I lost permission).",
-                ephemeral=True)
-        except ApiUnavailable:
-            await interaction.followup.send(UNREACHABLE_MSG, ephemeral=True)
 
     # --- patch notes ---------------------------------------------------------
     async def fetch_patch_notes(self):
@@ -393,7 +400,7 @@ class StatsBot(discord.Client):
                     await self.post_match_card(
                         channel, link.account_id, full, display_name=poster_name,
                         track=(link.discord_id, link.guild_id),
-                        content=f"**{poster_name}** just finished a match")
+                        content=f"**{poster_name}** just finished a match", announce=True)
                     last_posted = m.match_id
                 if last_posted:  # skipped older matches (beyond the cap) are not revisited
                     self.db.update_last_match(link.discord_id, link.guild_id, last_posted)
@@ -406,6 +413,56 @@ class StatsBot(discord.Client):
 
     @poll_matches.before_loop
     async def _wait_ready(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=10)
+    async def backfill_cards(self):
+        """Re-edit cards that Statlocker had no rank/PP for when they were posted."""
+        rows = self.db.cards_awaiting_rank(int(time.time()) - BACKFILL_WINDOW,
+                                           limit=BACKFILL_PER_CYCLE,
+                                           max_attempts=BACKFILL_ATTEMPTS)
+        for row in rows:
+            channel = self.get_channel(row["channel_id"])
+            if channel is None:
+                self.db.set_match_post_attempts(row["message_id"], BACKFILL_ATTEMPTS)
+                continue
+            try:
+                msg = await channel.fetch_message(row["message_id"])
+                history = await self.dl.match_history(row["account_id"])
+            except (discord.NotFound, discord.Forbidden):
+                self.db.set_match_post_attempts(row["message_id"], BACKFILL_ATTEMPTS)
+                continue
+            except ApiUnavailable:
+                return  # Deadlock API down: nothing to render with, retry next cycle
+            base = next((m for m in history if m.match_id == row["match_id"]), None)
+            if base is None:  # fell out of the history window
+                self.db.set_match_post_attempts(row["message_id"], BACKFILL_ATTEMPTS)
+                continue
+            try:
+                stored = RankSnapshot(row["pp_before"], row["pp_after"],
+                                      row["rank_before"], row["rank_after"])
+                png, snap = await self.render_match(
+                    row["account_id"], await self.load_match(row["account_id"], base),
+                    fallback_name=row["display_name"], snapshot=stored)
+                if (snap.pp_after, snap.rank_after) == (row["pp_after"], row["rank_after"]):
+                    # Statlocker still has nothing new for this one: count the attempt
+                    self.db.set_match_post_attempts(row["message_id"],
+                                                    row["backfill_attempts"] + 1)
+                    continue
+                await msg.edit(attachments=[discord.File(
+                    png, filename=f"match_{row['match_id']}.png")])
+            except ApiUnavailable:
+                return
+            except (discord.NotFound, discord.Forbidden):
+                self.db.set_match_post_attempts(row["message_id"], BACKFILL_ATTEMPTS)
+                continue
+            self.db.set_match_post_rank(row["message_id"], snap.pp_after, snap.rank_after)
+            log.info("backfill: match %s card %s now has %s PP / rank %s", row["match_id"],
+                     row["message_id"], snap.pp_after, snap.rank_after)
+            await asyncio.sleep(1)
+
+    @backfill_cards.before_loop
+    async def _backfill_ready(self):
         await self.wait_until_ready()
 
     @tasks.loop(seconds=600)
@@ -731,7 +788,7 @@ async def help_command(interaction: discord.Interaction):
               "`/pause` / `/resume` stop or restart auto-posting", inline=False)
     embed.add_field(
         name="Stats",
-        value="`/stats`, `/latestmatch`, `/matches`, `/matchstatus`\n"
+        value="`/stats`, `/latestmatch`, `/matches`, `/matchstatus`, `/top`\n"
               "Right-click a user → **Deadlock stats**, or a message with a Steam ID → "
               "**Deadlock lookup**.", inline=False)
     embed.add_field(
@@ -745,8 +802,7 @@ async def help_command(interaction: discord.Interaction):
               "`/settings channel` routes match cards or patch notes separately", inline=False)
     embed.add_field(
         name="Other",
-        value="**Refresh** under a match card re-renders it with newer data\n"
-              "`/status` bot and API health · `/invite` add the bot to another server", inline=False)
+        value="`/status` bot and API health · `/invite` add the bot to another server", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -769,11 +825,14 @@ async def status(interaction: discord.Interaction):
         f"{len(links)} linked · {bot.db.count_paused_links()} paused\n"
         f"last poll {_ago(bot.last_match_poll)} "
         f"{'✅' if bot.last_match_poll_ok else '⚠️' if bot.last_match_poll_ok is False else ''}\n"
-        f"{bot.db.count_match_posts()} tracked card(s)"), inline=True)
+        f"{bot.db.count_match_posts()} tracked card(s) · "
+        f"{bot.db.count_cards_awaiting_rank(int(time.time()) - BACKFILL_WINDOW, BACKFILL_ATTEMPTS)} "
+        f"awaiting rank"), inline=True)
     embed.add_field(name="Patches", value=(
         f"last poll {_ago(bot.last_patch_poll)} "
         f"{'✅' if bot.last_patch_poll_ok else '⚠️' if bot.last_patch_poll_ok is False else ''}\n"
         f"{len(bot.db.all_patch_notes())} stored note(s)"), inline=True)
+    embed.add_field(name="Statlocker", value=bot.sl.status_text(), inline=True)
     embed.add_field(name="Deadlock API", value=api_text, inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -876,6 +935,51 @@ async def latestmatch(interaction: discord.Interaction, steamid: str | None = No
     track = (interaction.user.id, interaction.guild_id) if steamid is None else None  # never track on someone else's card
     await bot.post_match_card(interaction.followup, acc, await bot.load_match(acc, history[0]),
                               display_name=name, track=track)
+
+
+TOP_LIMIT = 10
+TOP_MAX_ACCOUNTS = 100  # shortcut: links beyond this aren't fetched; raise if a server gets huge
+TOP_CONCURRENCY = 4
+
+
+@bot.tree.command(name="top", description="Best ranked players linked in this server")
+@app_commands.guild_only()
+async def top(interaction: discord.Interaction):
+    if not bot.sl.enabled:
+        return await interaction.response.send_message(
+            "Rank data isn't configured on this bot, so there's no ladder to show.", ephemeral=True)
+    await interaction.response.defer()
+    links = bot.db.links_for_guild(interaction.guild_id)
+    if not links:
+        return await interaction.followup.send("Nobody here is linked yet — `/link` to join.")
+    sem = asyncio.Semaphore(TOP_CONCURRENCY)
+
+    async def fetch(link):
+        async with sem:
+            return link, await bot.cached_profile(link.account_id)
+
+    checked = links[:TOP_MAX_ACCOUNTS]
+    entries = []
+    for link, profile in await asyncio.gather(*(fetch(link) for link in checked)):
+        member = interaction.guild.get_member(link.discord_id)
+        name = member.display_name if member else None
+        name = name or link.display_name or f"Account {link.account_id}"
+        entries.append((discord.utils.escape_markdown(name), profile))
+    body, shown, unranked = format_top(entries, limit=TOP_LIMIT)
+    if not shown:
+        return await interaction.followup.send(
+            "Nobody linked here has rank data yet — it appears once Statlocker has a ranked match.",
+            allowed_mentions=discord.AllowedMentions.none())
+    notes = [f"Powered by Statlocker · {len(links)} linked"]
+    if unranked:
+        notes.append(f"{unranked} without rank data")
+    if len(links) > TOP_MAX_ACCOUNTS:
+        notes.append(f"first {TOP_MAX_ACCOUNTS} checked")
+    embed = discord.Embed(title=f"{interaction.guild.name} · top {shown} by PP", colour=_BRASS,
+                          description=body)
+    embed.set_footer(text=" · ".join(notes))
+    # plain display names only: no user mentions, so nothing here can ping anyone
+    await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 _VERDICT_COLOURS = {"full": 0x3FB950, "partial": 0xD29922, "queued": 0xD29922,

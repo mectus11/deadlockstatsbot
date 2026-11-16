@@ -87,7 +87,13 @@ class DB:
                 account_id INTEGER NOT NULL,
                 match_id INTEGER NOT NULL,
                 display_name TEXT,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                channel_id INTEGER,
+                pp_before INTEGER,
+                pp_after INTEGER,
+                rank_before INTEGER,
+                rank_after INTEGER,
+                backfill_attempts INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS patch_channels (
                 guild_id INTEGER PRIMARY KEY,
@@ -117,6 +123,13 @@ class DB:
                 "ALTER TABLE patch_channels ADD COLUMN announced INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        for col in ("channel_id INTEGER", "pp_before INTEGER", "pp_after INTEGER",
+                    "rank_before INTEGER", "rank_after INTEGER",
+                    "backfill_attempts INTEGER NOT NULL DEFAULT 0"):
+            try:  # migration: match_posts gained the rank snapshot and backfill state
+                self.conn.execute(f"ALTER TABLE match_posts ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         # migration: guild_settings replaces `channels`; seed it once, while it is still empty
         # (re-running would resurrect a match channel an admin deliberately cleared)
         if not self.conn.execute("SELECT 1 FROM guild_settings LIMIT 1").fetchone():
@@ -128,11 +141,16 @@ class DB:
     # --- links -----------------------------------------------------------
     def set_link(self, discord_id: int, guild_id: int, account_id: int, last_match_id: int,
                  display_name: str | None = None) -> None:
+        # a different Steam account must not inherit the old one's PP/rank baseline
         self.conn.execute(
             "INSERT INTO links (discord_id, guild_id, account_id, last_match_id, display_name) VALUES (?,?,?,?,?) "
             "ON CONFLICT(discord_id, guild_id) DO UPDATE SET "
             "account_id=excluded.account_id, last_match_id=excluded.last_match_id, "
-            "display_name=COALESCE(excluded.display_name, links.display_name)",
+            "display_name=COALESCE(excluded.display_name, links.display_name), "
+            "last_pp_score=CASE WHEN links.account_id=excluded.account_id "
+            "THEN links.last_pp_score END, "
+            "last_rank_number=CASE WHEN links.account_id=excluded.account_id "
+            "THEN links.last_rank_number END",
             (discord_id, guild_id, account_id, last_match_id, display_name),
         )
         self.conn.commit()
@@ -207,11 +225,16 @@ class DB:
         return self.conn.execute("SELECT COUNT(*) FROM links WHERE paused=1").fetchone()[0]
 
     def save_match_post(self, message_id: int, account_id: int, match_id: int,
-                        display_name: str | None, created_at: int) -> None:
+                        display_name: str | None, created_at: int, *,
+                        channel_id: int | None = None, pp_before: int | None = None,
+                        pp_after: int | None = None, rank_before: int | None = None,
+                        rank_after: int | None = None) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO match_posts (message_id, account_id, match_id, display_name, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (message_id, account_id, match_id, display_name, created_at))
+            "INSERT OR REPLACE INTO match_posts (message_id, account_id, match_id, display_name, "
+            "created_at, channel_id, pp_before, pp_after, rank_before, rank_after) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (message_id, account_id, match_id, display_name, created_at, channel_id,
+             pp_before, pp_after, rank_before, rank_after))
         self.conn.commit()
 
     def get_match_post(self, message_id: int) -> sqlite3.Row | None:
@@ -220,6 +243,41 @@ class DB:
 
     def count_match_posts(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM match_posts").fetchone()[0]
+
+    def count_cards_awaiting_rank(self, since: int, max_attempts: int = 3) -> int:
+        """Cards the backfill loop can still fix: recent, under the attempt cap, missing data."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM match_posts WHERE channel_id IS NOT NULL AND created_at >= ? "
+            "AND backfill_attempts < ? AND (rank_after IS NULL OR pp_after IS NULL)",
+            (since, max_attempts)).fetchone()[0]
+
+    def cards_awaiting_rank(self, since: int, limit: int = 3,
+                            max_attempts: int = 3) -> list[sqlite3.Row]:
+        """Oldest cards still missing rank data, newest match per account only: an older
+        card's PP delta would otherwise be measured against a baseline a later one moved."""
+        return self.conn.execute(
+            "SELECT * FROM match_posts WHERE channel_id IS NOT NULL AND created_at >= ? "
+            "AND backfill_attempts < ? AND (rank_after IS NULL OR pp_after IS NULL) "
+            "AND match_id = (SELECT MAX(match_id) FROM match_posts p2 "
+            "WHERE p2.account_id = match_posts.account_id) "
+            "ORDER BY created_at LIMIT ?", (since, max_attempts, limit)).fetchall()
+
+    def set_match_post_rank(self, message_id: int, pp_after: int | None,
+                            rank_after: int | None) -> None:
+        self.conn.execute(
+            "UPDATE match_posts SET pp_after=?, rank_after=? WHERE message_id=?",
+            (pp_after, rank_after, message_id))
+        self.conn.commit()
+
+    def set_match_post_attempts(self, message_id: int, attempts: int) -> None:
+        self.conn.execute(
+            "UPDATE match_posts SET backfill_attempts=? WHERE message_id=?",
+            (attempts, message_id))
+        self.conn.commit()
+
+    def links_for_guild(self, guild_id: int) -> list[Link]:
+        return [Link(**dict(r)) for r in
+                self.conn.execute("SELECT * FROM links WHERE guild_id=?", (guild_id,))]
 
     # --- patch notes -----------------------------------------------------
     def get_patch_channel(self, guild_id: int) -> PatchChannel | None:

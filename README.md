@@ -64,12 +64,13 @@ Match cards also cover the less ordinary games — Street Brawl shows the round 
 | `/latestmatch [steamid]` | Full match card for the latest game, including items and party. |
 | `/matches [steamid] [count]` | Compact list of recent matches: result, hero, mode, KDA (default 10). |
 | `/matchstatus [match_id]` | Checks whether the Deadlock API has ingested a match: scoreboard, metadata, salts, or still queued. Defaults to your latest match. |
+| `/top` | Server ladder of the best-ranked linked players by PP. |
 | `/patchnotes [count]` | Posts the latest Deadlock patch notes from Steam (default 1, max 3) with a Steam link and a Hero Changes button. |
 | `/pause` / `/resume` | Stops or restarts automatic match posts without unlinking. `/resume` skips the backlog. |
 | `/setchannel [channel]` | (Admins) Channel for automatic match cards; patch notes follow it unless routed elsewhere. Defaults to the current one. |
 | `/settings show` | (Admins) Shows the match-card and patch-note channels. |
 | `/settings channel feature:<matches\|patches> [channel]` | (Admins) Routes one feature; leave the channel empty to fall back to the match channel. |
-| `/status` | Bot uptime, latency, build, linked/paused counts, last polls, Deadlock API health. |
+| `/status` | Bot uptime, latency, build, linked/paused counts, last polls, Deadlock and Statlocker health. |
 | `/invite` | Link to add the bot to another server. |
 | `/help` | Command summary. |
 | `/unlink` | Forgets your saved account and stops automatic posts for you. |
@@ -171,7 +172,6 @@ tests and the Steam patch-note tests. `python preview_cards.py` renders sample c
 
 Files: `bot.py` commands + pollers · `cards.py` image cards · `deadlock_api.py` / `statlocker.py` API clients ·
 `models.py` parsing · `steam_news.py` Steam patch-note parsing · `patchnote_views.py` patch-note buttons ·
-`card_views.py` match-card Refresh button ·
 `images.py` download cache · `stats.py` aggregates · `steam.py` ID parsing · `db.py` storage · `probe.py` live-data
 check.
 

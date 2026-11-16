@@ -768,11 +768,11 @@ def _scoreboard_panel(c: Canvas, x, y, w, b: Scoreboard) -> int:
     c.tracked_text(x + 360, y + 18, "K / D / A", 8, FAINT, True, "la", 1.4)
     c.tracked_text(x + 450, y + 18, "KP", 8, FAINT, True, "la", 1.4)
     c.tracked_text(x + 500, y + 18, "ACC", 8, FAINT, True, "la", 1.4)
-    c.tracked_text(x + w - 300, y + 18, "DMG", 8, FAINT, True, "ra", 1.4)
-    c.tracked_text(x + w - 225, y + 18, "HEAL", 8, FAINT, True, "ra", 1.4)
-    c.tracked_text(x + w - 150, y + 18, "SOULS", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 300, y + 18, "SOULS", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 225, y + 18, "DMG", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 150, y + 18, "TAKEN", 8, FAINT, True, "ra", 1.4)
     c.tracked_text(x + w - 85, y + 18, "OBJ", 8, FAINT, True, "ra", 1.4)
-    c.tracked_text(x + w - 24, y + 18, "TAKEN", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 24, y + 18, "HEAL", 8, FAINT, True, "ra", 1.4)
     yy = y + 46
     for team in teams:
         col = GREEN if team.won is True else RED if team.won is False else BRASS
@@ -810,18 +810,18 @@ def _scoreboard_panel(c: Canvas, x, y, w, b: Scoreboard) -> int:
                 c.text(x + 450, mid1, _pct(r.kill_part), 12, TEXT, True, "lm")
             if r.accuracy is not None:
                 c.text(x + 500, mid1, _pct(r.accuracy), 12, MUTED, True, "lm")
-            if r.damage is not None:
-                c.text(x + w - 300, mid1, _fmt(r.damage, "{:,.0f}"), 12, BRASS, True, "rm")
-            if r.healing is not None:
-                c.text(x + w - 225, mid1, _fmt(r.healing, "{:,.0f}"), 12, GREEN, True, "rm")
             if r.net_worth is not None:
                 nw = _fmt(r.net_worth, "{:,.0f}")
-                c.text(x + w - 150, mid1, nw, 12, MINT, True, "rm")
-                c.soul(x + w - 150 - c.text_w(nw, 12, True) - 10, mid1, 13)
+                c.text(x + w - 300, mid1, nw, 12, MINT, True, "rm")
+                c.soul(x + w - 300 - c.text_w(nw, 12, True) - 10, mid1, 13)
+            if r.damage is not None:
+                c.text(x + w - 225, mid1, _fmt(r.damage, "{:,.0f}"), 12, BRASS, True, "rm")
+            if r.damage_taken is not None:
+                c.text(x + w - 150, mid1, _fmt(r.damage_taken, "{:,.0f}"), 12, RED, True, "rm")
             if r.obj_damage is not None:
                 c.text(x + w - 85, mid1, _fmt(r.obj_damage, "{:,.0f}"), 12, STEEL, True, "rm")
-            if r.damage_taken is not None:
-                c.text(x + w - 24, mid1, _fmt(r.damage_taken, "{:,.0f}"), 12, RED, True, "rm")
+            if r.healing is not None:
+                c.text(x + w - 24, mid1, _fmt(r.healing, "{:,.0f}"), 12, GREEN, True, "rm")
 
             # second line: level and rates
             details = []

@@ -931,6 +931,18 @@ class ItemView:
 
 
 @dataclass
+class PartyMemberView:
+    hero: str
+    name: str
+    kills: int | None
+    deaths: int | None
+    assists: int | None
+    net_worth: int | None
+    hero_icon: bytes | None = None
+    avatar: bytes | None = None
+
+
+@dataclass
 class MatchCardData:
     name: str
     hero: str
@@ -963,8 +975,53 @@ class MatchCardData:
     rank_badge: bytes | None = None
     pp_score: int | None = None
     pp_delta: int | None = None         # change since the last match tracked for this player
-    scoreboard: Scoreboard | None = None
+    party: list[PartyMemberView] = field(default_factory=list)
     statlocker: bool = False
+
+
+PARTY_ROW_H = 38
+
+
+def _party_panel(c: Canvas, x, y, w, members: list[PartyMemberView]) -> int:
+    h = 44 + max(1, len(members)) * PARTY_ROW_H + 8
+    c.panel(x, y, w, h)
+    c.panel_header(x + 24, y + 16, w - 48, "YOUR PARTY", f"{len(members)} MATE{'S' if len(members) != 1 else ''}")
+    if not members:
+        c.tracked_text(x + 24, y + 50, "NO PARTY DATA", 10, MUTED, True, "la", 1.6)
+        return h
+    yy = y + 44
+    for i, m in enumerate(members):
+        mid = yy + PARTY_ROW_H / 2
+        # HERO AVATAR - STEAM AVATAR - STEAM NAME - HERO NAME - K / D / A ... souls
+        c.icon(m.hero_icon, x + 24, yy + 4, 30, 30, cut=5, border=STEEL, label=m.hero,
+               focus=(0.5, 0.3), bg=PANEL_2, width=1)
+        nx = x + 60
+        if m.avatar:
+            c.icon(m.avatar, x + 58, yy + 5, 28, 28, cut=5, border=LINE_2, bg=PANEL_2,
+                   fit="cover", width=1)
+            nx = x + 92
+        kx = x + 520
+        name_right = kx - 18
+        steam_txt = c.fit_tracked(m.name.upper(), 12, True, max(80, (name_right - nx) * 0.58), 1.0, "display")
+        c.tracked_text(nx, mid, steam_txt, 12, TEXT, True, "lm", 1.0, family="display")
+        nx_hero = nx + c.tracked_w(steam_txt, 12, True, 1.0) + 16
+        hero_txt = c.fit_tracked(m.hero.upper(), 11, True, max(60, name_right - nx_hero), 1.0, "display")
+        c.tracked_text(nx_hero, mid, hero_txt, 11, MUTED, True, "lm", 1.0, family="display")
+        # colour-coded K / D / A (spaced out)
+        parts = [(_fmt(m.kills), GREEN), ("  /  ", FAINT), (_fmt(m.deaths), RED),
+                 ("  /  ", FAINT), (_fmt(m.assists), TEXT)]
+        px = kx
+        for txt, col in parts:
+            c.text(px, mid, txt, 13, col, True, "lm")
+            px += c.text_w(txt, 13, True)
+        if m.net_worth is not None:
+            nw = _fmt(m.net_worth, "{:,.0f}")
+            c.text(x + w - 24, mid, nw, 12, MINT, True, "rm")
+            c.soul(x + w - 24 - c.text_w(nw, 12, True) - 10, mid, 13)
+        if i < len(members) - 1:
+            c.divider(x + 24, yy + PARTY_ROW_H, w - 48, LINE)
+        yy += PARTY_ROW_H
+    return h
 
 
 def render_match_card(d: MatchCardData) -> io.BytesIO:
@@ -977,12 +1034,11 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
 
     y_kda, kda_h = 192, 150
     y_items = (y_kda + kda_h) + 14 + (STATS_PANEL_H + 14 if d.stats else 0)
-    board = d.scoreboard if d.scoreboard and (d.scoreboard.own.rows or d.scoreboard.enemy.rows) else None
-    score_h = (46 + sum(30 + max(1, len(t.rows)) * SCORE_ROW_H + 6
-                        for t in (board.own, board.enemy)) + 4) if board else 0
+    party = list(d.party)
+    party_h = (44 + max(1, len(party)) * PARTY_ROW_H + 8) if party else 0
     after_items = y_items + items_h
-    y_score = after_items + 14 if board else None
-    y_end = (y_score + score_h) if board else after_items
+    y_party = after_items + 14 if party else None
+    y_end = (y_party + party_h) if party else after_items
     y = y_end + 18 + (26 if has_lobby else 0)
     c = Canvas(1000, y + 48)
 
@@ -1090,9 +1146,9 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
         c.tracked_text(936, y_items + items_h - 16, f"+{len(items) - MAX_ITEMS} MORE", 9, MUTED,
                        True, "ra", 1.4)
 
-    # scoreboard -----------------------------------------------------------
-    if board:
-        _scoreboard_panel(c, 40, y_score, 920, board)
+    # party ----------------------------------------------------------------
+    if party:
+        _party_panel(c, 40, y_party, 920, party)
 
     # lobby + footer --------------------------------------------------------
     y = y_end + 18
@@ -1111,6 +1167,50 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
         y += 26
     c.divider(40, y + 6, 920, LINE, major=True)
     _footer(c, y + 14, d.statlocker)
+    return c.png()
+
+
+@dataclass
+class ScoreboardCardData:
+    match_id: int
+    hero: str
+    name: str
+    won: bool | None
+    mode: str | None = None
+    duration_s: int | None = None
+    scoreboard: Scoreboard | None = None
+
+
+def render_scoreboard_card(d: ScoreboardCardData) -> io.BytesIO:
+    board = d.scoreboard if d.scoreboard and (d.scoreboard.own.rows or d.scoreboard.enemy.rows) else None
+    color = GREEN if d.won is True else RED if d.won is False else BRASS
+    result = "VICTORY" if d.won is True else "DEFEAT" if d.won is False else "MATCH"
+    header_h = 96
+    if board:
+        score_h = 46 + sum(30 + max(1, len(t.rows)) * SCORE_ROW_H + 6
+                           for t in (board.own, board.enemy)) + 4
+    else:
+        score_h = 70
+    h = 28 + header_h + 14 + score_h + 28
+    c = Canvas(1000, h)
+    c.panel(40, 28, 920, header_h, rail=color)
+    c.tracked_text(64, 44, result, 34, color, True, "la", 2.4, family="display")
+    c.tracked_text(64, 86, c.fit_tracked(d.hero.upper(), 16, True, 320, 1.2, "display"), 16,
+                   TEXT, True, "la", 1.2, family="display")
+    meta = f"MATCH #{d.match_id}"
+    if d.mode:
+        meta += f"  ·  {d.mode.upper()}"
+    if d.duration_s:
+        meta += f"  ·  {_mmss(d.duration_s)}"
+    c.tracked_text(936, 50, c.fit_tracked(d.name.upper(), 14, True, 420, 1.0, "display"), 14,
+                   TEXT, True, "ra", 1.0, family="display")
+    c.tracked_text(936, 78, c.fit_tracked(meta.upper(), 9, True, 520, 1.6), 9, MUTED, True,
+                   "ra", 1.6)
+    if board:
+        _scoreboard_panel(c, 40, 28 + header_h + 14, 920, board)
+    else:
+        c.panel(40, 28 + header_h + 14, 920, 70)
+        c.tracked_text(64, 28 + header_h + 14 + 28, "SCOREBOARD UNAVAILABLE", 11, MUTED, True, "la", 2.0)
     return c.png()
 
 

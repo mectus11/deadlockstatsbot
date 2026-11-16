@@ -305,7 +305,7 @@ sample_stats = MatchStats(
     shots_hit=1913, shots_missed=1321, hero_bullets_hit=1759, hero_bullets_hit_crit=226,
     creep_damage=8832, neutral_damage=937, boss_damage=3977, creep_kills=31, possible_creeps=38,
     neutral_kills=2, bullet_kills=9, melee_kills=1, ability_kills=4, headshot_kills=1, level=24)
-# scoreboard sample (12 players, stacked teams)
+# scoreboard/party samples
 def _srow(hero_id, name, hero_name, k, d, a, nw, dmg, *, self_=False, mvp=False, gr=None, badge=None,
           kp=None, obj=None, acc=None, taken=None, heal=None, lvl=None, dpm=None, spm=None, party=False, avatar=None):
     return cards.ScoreRow(hero=hero_name, name=name, kills=k, deaths=d, assists=a, net_worth=nw,
@@ -313,6 +313,7 @@ def _srow(hero_id, name, hero_name, k, d, a, nw, dmg, *, self_=False, mvp=False,
                           is_self=self_, is_party=party, mvp=mvp, global_rank=gr, kill_part=kp, obj_damage=obj,
                           accuracy=acc, damage_taken=taken, healing=heal, level=lvl,
                           dmg_per_min=dpm, souls_per_min=spm)
+
 
 own_team = cards.ScoreTeam("Amber Hand", True, [
     _srow(1, "ExamplePlayer", "Infernus", 11, 4, 17, 48210, 17883, self_=True, mvp=True, badge=fake_icon(5), kp=0.64, obj=3977, acc=0.59, taken=2452, heal=323, lvl=24, dpm=494, spm=1331, avatar=fake_icon(3)),
@@ -332,13 +333,30 @@ enemy_team = cards.ScoreTeam("Sapphire Flame", False, [
 ])
 sample_scoreboard = cards.Scoreboard(own=own_team, enemy=enemy_team)
 
+sample_party = [
+    cards.PartyMemberView("Abrams", "Mectus", 7, 5, 19, 41230, hero_icon=fake_icon(5), avatar=fake_icon(4)),
+    cards.PartyMemberView("Haze", "Nyx", 14, 2, 9, 52880, hero_icon=fake_icon(6), avatar=fake_icon(8)),
+]
+sample_party_full = sample_party + [
+    cards.PartyMemberView("Lady Geist", "Corvid", 4, 7, 22, 37110, hero_icon=fake_icon(4), avatar=fake_icon(9)),
+]
+
 match_data = cards.MatchCardData(
     won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items,
     own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3",
     own_lobby_rank_badge=fake_icon(5), enemy_lobby_rank_badge=fake_icon(4),
     rank_name="Oracle 4", rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True,
-    mode="Ranked", mode_kind="ranked", stats=sample_stats, scoreboard=sample_scoreboard, **common)
+    mode="Ranked", mode_kind="ranked", stats=sample_stats, party=sample_party, **common)
 save("match.png", cards.render_match_card(match_data))
+save("match_no_party.png", cards.render_match_card(cards.MatchCardData(
+    won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items[:10],
+    own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3",
+    own_lobby_rank_badge=fake_icon(5), enemy_lobby_rank_badge=fake_icon(4),
+    rank_name="Oracle 4", rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True,
+    mode="Ranked", mode_kind="ranked", stats=sample_stats, **common)))
+save("match_party_full.png", cards.render_match_card(cards.MatchCardData(
+    won=False, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items[:8],
+    mode="Standard", mode_kind="standard", stats=sample_stats, party=sample_party_full, **common)))
 save("match_brawl.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(6), avatar=fake_icon(3), items=items[:8], mode="Street Brawl",
     mode_kind="brawl", brawl_score=(3, 1), brawl_round_avg_s=154, stats=sample_stats, **common)))
@@ -356,39 +374,18 @@ save("match_many_items.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(4), items=items * 2, mode="Ranked", mode_kind="ranked",
     rank_name="Oracle 4", rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True,
     stats=sample_stats, **common)))
-party_own = cards.ScoreTeam("Amber Hand", True, [
-    _srow(1, "ExamplePlayer", "Infernus", 11, 4, 17, 48210, 17883, self_=True, mvp=True, badge=fake_icon(5), kp=0.64, obj=3977, acc=0.59, taken=2452, heal=323, lvl=24, dpm=494, spm=1331, avatar=fake_icon(3)),
-    _srow(5, "Mectus", "Abrams", 7, 5, 19, 41230, 12450, badge=fake_icon(5), kp=0.59, obj=2100, acc=0.52, taken=3100, heal=820, lvl=22, dpm=344, spm=1138, party=True, avatar=fake_icon(4)),
-    _srow(6, "Nyx", "Haze", 14, 2, 9, 52880, 20110, gr=412, kp=0.52, obj=5200, acc=0.61, taken=1980, heal=150, lvl=25, dpm=555, spm=1460, party=True, avatar=fake_icon(8)),
-    _srow(4, "Corvid", "Lady Geist", 4, 7, 22, 37110, 9800, kp=0.59, obj=1400, acc=0.48, taken=4200, heal=2100, lvl=21, dpm=270, spm=1024, party=True, avatar=fake_icon(9)),
-    _srow(2, "Vesper", "Seven", 9, 6, 13, 44900, 14320, kp=0.50, obj=3300, acc=0.55, taken=3600, heal=400, lvl=23, dpm=395, spm=1240, avatar=fake_icon(7)),
-    _srow(3, "Ash", "Vindicta", 3, 9, 6, 31850, 7200, kp=0.20, obj=900, acc=0.44, taken=5100, heal=0, lvl=19, dpm=199, spm=879, avatar=fake_icon(6)),
-])
-party_full_own = cards.ScoreTeam("Amber Hand", False, [
-    _srow(1, "ExamplePlayer", "Infernus", 11, 4, 17, 48210, 17883, self_=True, badge=fake_icon(5), kp=0.64, obj=3977, acc=0.59, taken=2452, heal=323, lvl=24, dpm=494, spm=1331, avatar=fake_icon(3)),
-    _srow(5, "Mectus", "Abrams", 7, 5, 19, 41230, 12450, badge=fake_icon(5), kp=0.59, obj=2100, acc=0.52, taken=3100, heal=820, lvl=22, dpm=344, spm=1138, party=True, avatar=fake_icon(4)),
-    _srow(6, "Nyx", "Haze", 14, 2, 9, 52880, 20110, gr=412, kp=0.52, obj=5200, acc=0.61, taken=1980, heal=150, lvl=25, dpm=555, spm=1460, party=True, avatar=fake_icon(8)),
-    _srow(4, "Corvid", "Lady Geist", 4, 7, 22, 37110, 9800, kp=0.59, obj=1400, acc=0.48, taken=4200, heal=2100, lvl=21, dpm=270, spm=1024, party=True, avatar=fake_icon(9)),
-    _srow(2, "Vesper", "Seven", 9, 6, 13, 44900, 14320, kp=0.50, obj=3300, acc=0.55, taken=3600, heal=400, lvl=23, dpm=395, spm=1240, party=True, avatar=fake_icon(7)),
-    _srow(3, "Ash", "Vindicta", 3, 9, 6, 31850, 7200, kp=0.20, obj=900, acc=0.44, taken=5100, heal=0, lvl=19, dpm=199, spm=879, party=True, avatar=fake_icon(6)),
-])
-save("match_scoreboard.png", cards.render_match_card(cards.MatchCardData(
-    won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items,
-    own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3",
-    own_lobby_rank_badge=fake_icon(5), enemy_lobby_rank_badge=fake_icon(4),
-    rank_name="Oracle 4", rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True,
-    mode="Ranked", mode_kind="ranked", stats=sample_stats, scoreboard=sample_scoreboard, **common)))
-save("match_party.png", cards.render_match_card(cards.MatchCardData(
-    won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items,
-    own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3",
-    own_lobby_rank_badge=fake_icon(5), enemy_lobby_rank_badge=fake_icon(4),
-    rank_name="Oracle 4", rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True,
-    mode="Ranked", mode_kind="ranked", stats=sample_stats,
-    scoreboard=cards.Scoreboard(own=party_own, enemy=enemy_team), **common)))
-save("match_party_full.png", cards.render_match_card(cards.MatchCardData(
-    won=False, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items[:8],
-    mode="Standard", mode_kind="standard", stats=sample_stats,
-    scoreboard=cards.Scoreboard(own=party_full_own, enemy=cards.ScoreTeam("Sapphire Flame", True, enemy_team.rows)), **common)))
+
+# separate scoreboard card previews (button-triggered in bot)
+save("scoreboard.png", cards.render_scoreboard_card(cards.ScoreboardCardData(
+    match_id=41525919, hero="Infernus", name="ExamplePlayer", won=True, mode="Ranked",
+    duration_s=2174, scoreboard=sample_scoreboard)))
+save("scoreboard_loss.png", cards.render_scoreboard_card(cards.ScoreboardCardData(
+    match_id=41525918, hero="Infernus", name="ExamplePlayer", won=False, mode="Standard",
+    duration_s=1800, scoreboard=cards.Scoreboard(
+        own=cards.ScoreTeam("Amber Hand", False, own_team.rows),
+        enemy=cards.ScoreTeam("Sapphire Flame", True, enemy_team.rows)))))
+save("scoreboard_unavailable.png", cards.render_scoreboard_card(cards.ScoreboardCardData(
+    match_id=41525917, hero="Infernus", name="ExamplePlayer", won=None, scoreboard=None)))
 save("matches.png", cards.render_matches_card(cards.MatchesCardData(
     name="ExamplePlayer", account_id=123456789, avatar=fake_icon(3), statlocker=True,
     matches=[cards.MatchRow("Infernus", True, 11, 4, 17, 41525919, 1757346341, 2174,

@@ -667,7 +667,26 @@ class MatchCardStats(unittest.TestCase):
                              pp_score=900, pp_delta=-40)
         self.assertGreater(len(demoted.getvalue()), 0)
 
-    def test_renders_scoreboard_party_markers(self):
+    def test_renders_party_panel(self):
+        import cards
+        party = [
+            cards.PartyMemberView("Abrams", "Mate", 7, 5, 19, 41230),
+            cards.PartyMemberView("Haze", "Nyx", 14, 2, 9, 52880),
+        ]
+        with_party = self._card(party=party, stats=MatchStats(hero_damage=1))
+        without = self._card()
+        self.assertGreater(len(with_party.getvalue()), 0)
+        self.assertGreater(len(without.getvalue()), 0)
+        from PIL import Image
+        self.assertGreater(Image.open(with_party).size[1], Image.open(without).size[1])
+
+    def test_renders_lobby_badges(self):
+        png = self._card(own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3")
+        self.assertGreater(len(png.getvalue()), 0)
+
+
+class ScoreboardCardTests(unittest.TestCase):
+    def test_renders_scoreboard_card(self):
         import cards
         own = cards.ScoreTeam("Amber Hand", True, [
             cards.ScoreRow("Infernus", "Me", 10, 2, 8, 30000, 15000, is_self=True, mvp=True),
@@ -676,27 +695,17 @@ class MatchCardStats(unittest.TestCase):
         enemy = cards.ScoreTeam("Sapphire Flame", False, [
             cards.ScoreRow("Seven", "Foe", 3, 9, 4, 18000, 7000),
         ])
-        png = self._card(scoreboard=cards.Scoreboard(own=own, enemy=enemy), stats=MatchStats(hero_damage=1))
+        board = cards.Scoreboard(own=own, enemy=enemy)
+        png = cards.render_scoreboard_card(cards.ScoreboardCardData(
+            match_id=1, hero="Infernus", name="Me", won=True, mode="Ranked",
+            duration_s=2174, scoreboard=board))
         self.assertGreater(len(png.getvalue()), 0)
 
-    def test_renders_scoreboard_and_lobby_badges(self):
+    def test_renders_scoreboard_card_unavailable(self):
         import cards
-        own = cards.ScoreTeam("Amber Hand", True, [
-            cards.ScoreRow("Infernus", "Me", 10, 2, 8, 30000, 15000, is_self=True, mvp=True),
-            cards.ScoreRow("Haze", "Ally", 5, 4, 6, 22000, 9000),
-        ])
-        enemy = cards.ScoreTeam("Sapphire Flame", False, [
-            cards.ScoreRow("Seven", "Foe", 3, 9, 4, 18000, 7000),
-        ])
-        board = cards.Scoreboard(own=own, enemy=enemy)
-        with_board = self._card(scoreboard=board, own_lobby_rank="Oracle 5",
-                                enemy_lobby_rank="Oracle 3")
-        without = self._card()
-        self.assertGreater(len(with_board.getvalue()), 0)
-        self.assertGreater(len(without.getvalue()), 0)
-        # scoreboard adds height
-        from PIL import Image
-        self.assertGreater(Image.open(with_board).size[1], Image.open(without).size[1])
+        png = cards.render_scoreboard_card(cards.ScoreboardCardData(
+            match_id=1, hero="Infernus", name="Me", won=False, scoreboard=None))
+        self.assertGreater(len(png.getvalue()), 0)
 
 
 if __name__ == "__main__":

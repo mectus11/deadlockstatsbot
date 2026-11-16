@@ -18,6 +18,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 
@@ -59,6 +60,40 @@ _BRASS = discord.Colour.from_rgb(*T.BRASS)
 UNREACHABLE_MSG = ("I couldn't reach api.deadlock-api.com (network or DNS problem on the bot's computer). "
                    "Check the internet connection and try again in a minute.")
 _SHORT_MODE = {"ranked": "Ranked", "brawl": "Brawl", "bot": "Bot", "standard": "Standard"}
+
+
+class ScoreboardButton(discord.ui.DynamicItem[discord.ui.Button], template=r"scoreboard:(?P<match_id>\d+):(?P<account_id>\d+)"):
+    def __init__(self, bot: "StatsBot", match_id: int, account_id: int):
+        self.bot = bot
+        self.match_id = int(match_id)
+        self.account_id = int(account_id)
+        super().__init__(discord.ui.Button(
+            label="Scoreboard",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"scoreboard:{self.match_id}:{self.account_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str], /):
+        return cls(interaction.client, int(match["match_id"]), int(match["account_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            png = await self.bot.build_scoreboard_card(self.account_id, self.match_id)
+        except Exception:
+            log.exception("scoreboard failed for match %s account %s", self.match_id, self.account_id)
+            await interaction.followup.send("Couldn't load the scoreboard right now.", ephemeral=True)
+            return
+        if png is None:
+            await interaction.followup.send("Scoreboard unavailable for this match.", ephemeral=True)
+            return
+        channel = interaction.channel
+        if channel is None:
+            await interaction.followup.send("Couldn't post the scoreboard here.", ephemeral=True)
+            return
+        await channel.send(file=discord.File(png, filename=f"scoreboard_{self.match_id}.png"))
+        await interaction.followup.send("Scoreboard posted.", ephemeral=True)
 
 
 def _short_mode(m: Match) -> str:

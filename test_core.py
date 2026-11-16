@@ -16,8 +16,8 @@ from models import (BrawlRound, ItemBuy, Match, MatchStats, SteamProfile, final_
                     ingest_verdict, match_type, mate_ids, merge_match, normalize_entry,
                     normalize_metadata, parse_assets, parse_match_info, parse_salts,
                     parse_steam_profile, parse_steam_profiles, pick_image, resolve_identity)
-from statlocker import (RankSnapshot, format_top, parse_lobby, parse_profile, rank_badge_url,
-                        rank_name)
+from statlocker import (RankSnapshot, format_top, parse_lobby, parse_match_players, parse_profile,
+                        rank_badge_url, rank_name)
 from stats import compute_overall
 from steam import account_to_steam64, find_steam_input, parse_steam_input
 
@@ -332,6 +332,36 @@ class StatlockerParsing(unittest.TestCase):
         self.assertEqual((s.own_rank, s.enemy_rank), (85, 86))
         self.assertIsNone(parse_lobby(match, 999))
 
+    def test_parse_match_players_tolerant(self):
+        match = {"players": [
+            {"accountId": 10, "team": "Amber Hand", "heroId": 2, "kills": 5, "deaths": 1, "assists": 9,
+             "playerDamage": 12000, "netWorth": 30000, "mvpScore": 99.5, "teamMvpPlacement": 1,
+             "globalRank": 42, "objectiveDamage": 3400, "killParticipation": 0.62,
+             "damagePerMin": 1450.5, "soulsPerMinute": 980.0, "accuracy": 0.41,
+             "playerDamageTaken": 4300, "playerHealing": 900, "level": 24,
+             "steamProfile": {"name": "A", "avatarUrl": "u", "estimatedRankNumber": 84}},
+            {"account_id": 11, "team": "Sapphire Flame", "hero_id": 3, "kills": 2, "deaths": 7, "assists": 4,
+             "metrics": {"kill_participation": 55, "objective_damage": 900, "damage_taken": 5000, "healing": 100}},
+            {"team": "Amber Hand"},  # no account id: skipped
+            "junk",
+        ]}
+        players = {p.account_id: p for p in parse_match_players(match)}
+        self.assertEqual(set(players), {10, 11})
+        self.assertEqual((players[10].hero_id, players[10].kills, players[10].hero_damage,
+                          players[10].net_worth, players[10].rank_number, players[10].team_mvp_place,
+                          players[10].global_rank, players[10].name, players[10].obj_damage,
+                          players[10].damage_taken, players[10].healing, players[10].level),
+                         (2, 5, 12000, 30000, 84, 1, 42, "A", 3400, 4300, 900, 24))
+        self.assertAlmostEqual(players[10].kill_part, 0.62)
+        self.assertAlmostEqual(players[10].dmg_per_min, 1450.5)
+        self.assertAlmostEqual(players[10].souls_per_min, 980.0)
+        self.assertAlmostEqual(players[10].accuracy, 0.41)
+        self.assertEqual(players[11].obj_damage, 900)
+        self.assertEqual(players[11].kill_part, 55)
+        self.assertEqual((players[11].damage_taken, players[11].healing), (5000, 100))
+        self.assertIsNone(players[11].rank_number)
+        self.assertEqual(parse_match_players({}), [])
+
 
 class Database(unittest.TestCase):
     def test_creates_missing_directory(self):
@@ -644,6 +674,25 @@ class MatchCardStats(unittest.TestCase):
                  cards.PartyMemberView("Unknown", "Hero #99", None, None, None, None)]
         png = self._card(party=party, stats=MatchStats(hero_damage=1))
         self.assertGreater(len(png.getvalue()), 0)
+
+    def test_renders_scoreboard_and_lobby_badges(self):
+        import cards
+        own = cards.ScoreTeam("Amber Hand", True, [
+            cards.ScoreRow("Infernus", "Me", 10, 2, 8, 30000, 15000, is_self=True, mvp=True),
+            cards.ScoreRow("Haze", "Ally", 5, 4, 6, 22000, 9000),
+        ])
+        enemy = cards.ScoreTeam("Sapphire Flame", False, [
+            cards.ScoreRow("Seven", "Foe", 3, 9, 4, 18000, 7000),
+        ])
+        board = cards.Scoreboard(own=own, enemy=enemy)
+        with_board = self._card(scoreboard=board, own_lobby_rank="Oracle 5",
+                                enemy_lobby_rank="Oracle 3")
+        without = self._card()
+        self.assertGreater(len(with_board.getvalue()), 0)
+        self.assertGreater(len(without.getvalue()), 0)
+        # scoreboard adds height
+        from PIL import Image
+        self.assertGreater(Image.open(with_board).size[1], Image.open(without).size[1])
 
 
 if __name__ == "__main__":

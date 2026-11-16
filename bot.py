@@ -283,9 +283,120 @@ class StatsBot(discord.Client):
         unknown = sum(1 for _, a in catalogued if a is None)
         own = {a.id: self.local.get(a.name, a.tier) for a in known}  # your files in assets/items win
         party = await self.party_members(m, account_id, heroes)
+
+        # scoreboard (metadata roster) + optional Statlocker enrichment, best-effort
+        scoreboard = None
+        sl_players: dict[int, "object"] = {}
+        if m.roster:
+            if self.sl.enabled:
+                sl_match = await self.sl.match(m.match_id)
+                if isinstance(sl_match, dict):
+                    from statlocker import parse_match_players
+                    sl_players = {p.account_id: p for p in parse_match_players(sl_match)}
+            # Steam names/avatars for the whole lobby (batch; reuses cache)
+            roster_ids = [p.account_id for p in m.roster]
+            steam_profiles = await self.dl.steam_profiles(roster_ids)
+            # collect hero icons and rank badges to fetch
+            rank_urls: dict[int, str | None] = {}
+            for rp in m.roster:
+                sp = sl_players.get(rp.account_id)
+                rank_urls[rp.account_id] = rank_badge_url(getattr(sp, "rank_number", None))
+            hero_urls = []
+            for rp in m.roster:
+                h = heroes.get(rp.hero_id)
+                hero_urls.append(h.image if h else None)
+            badge_urls = [u for u in rank_urls.values() if u]
+            board_pics = await self.images.get_many([u for u in hero_urls if u] + badge_urls)
+            own_team = m.team
+            own_rows, enemy_rows = [], []
+            for rp in m.roster:
+                h = heroes.get(rp.hero_id)
+                sp = sl_players.get(rp.account_id)
+                steam_p = steam_profiles.get(rp.account_id)
+                name = (getattr(sp, "name", None) or (steam_p.name if steam_p else None)
+                        or f"Account {rp.account_id}")
+                hero_name = h.name if h else (f"Hero #{rp.hero_id}" if rp.hero_id is not None else "Unknown hero")
+                rbadge = board_pics.get(rank_urls.get(rp.account_id)) if rank_urls.get(rp.account_id) else None
+                hicon = board_pics.get(h.image) if h and h.image else None
+                row = cards.ScoreRow(
+                    hero=hero_name, name=name,
+                    kills=rp.kills, deaths=rp.deaths, assists=rp.assists,
+                    net_worth=rp.net_worth,
+                    damage=getattr(sp, "hero_damage", None),
+                    hero_icon=hicon, rank_badge=rbadge,
+                    is_self=(rp.account_id == account_id),
+                    mvp=(getattr(sp, "team_mvp_place", None) == 1),
+                    global_rank=getattr(sp, "global_rank", None),
+                )
+                if own_team is not None and rp.team == own_team:
+                    own_rows.append(row)
+                elif own_team is not None:
+                    enemy_rows.append(row)
+                else:
+                    own_rows.append(row)
+            def slot_key(p):
+                try:
+                    return int(p.player_slot) if p.player_slot is not None else 99
+                except (TypeError, ValueError):
+                    return 99
+            roster_by_id = {p.account_id: p for p in m.roster}
+            # rows were appended in roster order but keep that; ensure stable by player_slot
+            # shortcut: build in roster order then split kept order; sort each side by slot
+            # (rebuild to preserve order)
+            own_order = [p for p in m.roster if own_team is not None and p.team == own_team]
+            enemy_order = [p for p in m.roster if own_team is not None and p.team != own_team]
+            if own_team is None:
+                own_order, enemy_order = list(m.roster), []
+            def rows_for(order):
+                out = []
+                for rp in sorted(order, key=slot_key):
+                    h = heroes.get(rp.hero_id)
+                    sp = sl_players.get(rp.account_id)
+                    steam_p = steam_profiles.get(rp.account_id)
+                    name = (getattr(sp, "name", None) or (steam_p.name if steam_p else None)
+                            or f"Account {rp.account_id}")
+                    hero_name = h.name if h else (f"Hero #{rp.hero_id}" if rp.hero_id is not None else "Unknown hero")
+                    rbadge = board_pics.get(rank_urls.get(rp.account_id)) if rank_urls.get(rp.account_id) else None
+                    hicon = board_pics.get(h.image) if h and h.image else None
+                    out.append(cards.ScoreRow(
+                        hero=hero_name, name=name,
+                        kills=rp.kills, deaths=rp.deaths, assists=rp.assists,
+                        net_worth=rp.net_worth,
+                        damage=getattr(sp, "hero_damage", None),
+                        hero_icon=hicon, rank_badge=rbadge,
+                        is_self=(rp.account_id == account_id),
+                        mvp=(getattr(sp, "team_mvp_place", None) == 1),
+                        global_rank=getattr(sp, "global_rank", None),
+                        kill_part=getattr(sp, "kill_part", None),
+                        obj_damage=getattr(sp, "obj_damage", None),
+                        dmg_per_min=getattr(sp, "dmg_per_min", None),
+                        souls_per_min=getattr(sp, "souls_per_min", None),
+                        accuracy=getattr(sp, "accuracy", None),
+                        damage_taken=getattr(sp, "damage_taken", None),
+                        healing=getattr(sp, "healing", None),
+                        level=getattr(sp, "level", None),
+                    ))
+                return out
+            own_rows = rows_for(own_order)
+            enemy_rows = rows_for(enemy_order)
+            own_label, enemy_label = "Your Team", "Enemy Team"
+            if sl_players:
+                me = sl_players.get(account_id)
+                my_team = str(getattr(me, "team", "") or "").lower() if me else ""
+                if "amber" in my_team:
+                    own_label, enemy_label = "Amber Hand", "Sapphire Flame"
+                elif "sapphire" in my_team:
+                    own_label, enemy_label = "Sapphire Flame", "Amber Hand"
+            scoreboard = cards.Scoreboard(
+                own=cards.ScoreTeam(own_label, m.won, own_rows),
+                enemy=cards.ScoreTeam(enemy_label, (not m.won) if m.won is not None else None, enemy_rows),
+            )
+
         badge_url = rank_badge_url(snap.rank_after)
+        own_lobby_badge_url = rank_badge_url(lobby.own_rank) if lobby else None
+        enemy_lobby_badge_url = rank_badge_url(lobby.enemy_rank) if lobby else None
         pics = await self.images.get_many([hero.image if hero else None, identity.avatar_url,
-                                           badge_url,
+                                           badge_url, own_lobby_badge_url, enemy_lobby_badge_url,
                                            *(a.image for a in known if not own[a.id])])
         mode_kind, mode = match_type(m)
         return cards.render_match_card(cards.MatchCardData(
@@ -303,12 +414,15 @@ class StatsBot(discord.Client):
             party=party,
             own_lobby_rank=rank_name(lobby.own_rank) if lobby else None,
             enemy_lobby_rank=rank_name(lobby.enemy_rank) if lobby else None,
+            own_lobby_rank_badge=pics.get(own_lobby_badge_url) if own_lobby_badge_url else None,
+            enemy_lobby_rank_badge=pics.get(enemy_lobby_badge_url) if enemy_lobby_badge_url else None,
             rank_name=rank_name(snap.rank_after),
             rank_prev=rank_name(snap.rank_before) if snap.rank_changed else None,
             rank_up=snap.promoted if snap.rank_changed else None,
             rank_badge=pics.get(badge_url) if badge_url else None,
             pp_score=snap.pp_after,
             pp_delta=snap.pp_delta,
+            scoreboard=scoreboard,
             statlocker=bool(profile or lobby),
         )), snap
 

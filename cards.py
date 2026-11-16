@@ -51,6 +51,7 @@ ITEM_LABEL_H = 15  # a name under each icon, so items are identifiable even when
 ITEM_CELL_H = ITEM_SIZE + ITEM_LABEL_H
 STATS_PANEL_H = 196
 PARTY_ROW_H = 44
+SCORE_ROW_H = 50
 FONT_DIR = Path(__file__).parent / "assets" / "fonts"
 
 # (file, variable-font weight or None)
@@ -709,6 +710,141 @@ def _party_panel(c: Canvas, x, y, w, h, party: list["PartyMemberView"]):
 
 # =============================================================================
 @dataclass
+class ScoreRow:
+    hero: str
+    name: str
+    kills: int | None
+    deaths: int | None
+    assists: int | None
+    net_worth: int | None
+    damage: int | None
+    hero_icon: bytes | None = None
+    rank_badge: bytes | None = None
+    is_self: bool = False
+    mvp: bool = False
+    global_rank: int | None = None
+    kill_part: float | None = None
+    obj_damage: int | None = None
+    dmg_per_min: float | None = None
+    souls_per_min: float | None = None
+    accuracy: float | None = None
+    damage_taken: int | None = None
+    healing: int | None = None
+    level: int | None = None
+
+
+@dataclass
+class ScoreTeam:
+    label: str
+    won: bool | None
+    rows: list[ScoreRow] = field(default_factory=list)
+
+
+@dataclass
+class Scoreboard:
+    own: ScoreTeam
+    enemy: ScoreTeam
+
+
+def _pct(v) -> str:
+    if v is None:
+        return "-"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    if f <= 1.0:
+        f *= 100
+    return f"{f:.0f}%"
+
+
+def _scoreboard_panel(c: Canvas, x, y, w, b: Scoreboard) -> int:
+    """Stacked two-team scoreboard. Returns panel height."""
+    teams = [b.own, b.enemy]
+    h = 46 + sum(30 + max(1, len(t.rows)) * SCORE_ROW_H + 6 for t in teams) + 4
+    c.panel(x, y, w, h)
+    c.panel_header(x + 24, y + 16, w - 48, "SCOREBOARD", None)
+    # top row: combat; bottom row: level/econ/survivability (Statlocker when available)
+    c.tracked_text(x + 360, y + 18, "K / D / A", 8, FAINT, True, "la", 1.4)
+    c.tracked_text(x + 455, y + 18, "KP", 8, FAINT, True, "la", 1.4)
+    c.tracked_text(x + 510, y + 18, "ACC", 8, FAINT, True, "la", 1.4)
+    c.tracked_text(x + w - 170, y + 18, "DMG", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 95, y + 18, "OBJ", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 24, y + 18, "TAKEN", 8, FAINT, True, "ra", 1.4)
+    yy = y + 46
+    for team in teams:
+        col = GREEN if team.won is True else RED if team.won is False else BRASS
+        c.tracked_text(x + 24, yy + 4, team.label.upper(), 9, col, True, "la", 2.0)
+        kills = sum(r.kills or 0 for r in team.rows) if team.rows else 0
+        c.tracked_text(x + w - 24, yy + 4, f"{kills} KILLS", 9, MUTED, True, "ra", 1.6)
+        c.divider(x + 24, yy + 24, w - 48, LINE)
+        yy += 30
+        if not team.rows:
+            c.text(x + 40, yy + 8, "No player data.", 11, MUTED)
+            yy += SCORE_ROW_H
+        for i, r in enumerate(team.rows):
+            top = yy + 4
+            mid1 = yy + 16
+            mid2 = yy + 36
+            if r.is_self:
+                c.d.rectangle(((x + 8) * c.s, (yy + 2) * c.s, (x + w - 8) * c.s, (yy + SCORE_ROW_H - 2) * c.s),
+                              fill=_mix(PANEL_2, EMERALD if team.won is not False else PANEL_3, 0.16))
+                c.d.rectangle(((x + 10) * c.s, (yy + 6) * c.s, (x + 13) * c.s, (yy + SCORE_ROW_H - 6) * c.s), fill=col)
+            c.icon(r.hero_icon, x + 24, top + 3, 30, 30, cut=5, border=col, label=r.hero,
+                   focus=(0.5, 0.3), bg=PANEL_2, width=1)
+            nx = x + 62
+            name = c.fit(r.name, 12, True, 180, family="body")
+            c.text(nx, mid1, name, 12, TEXT if r.is_self else MUTED, True, "lm", family="body")
+            after = nx + c.text_w(name, 12, True) + 6
+            if r.mvp:
+                c.tracked_text(after, mid1 - 4, "MVP", 8, BRASS, True, "la", 1.0)
+            elif r.global_rank is not None and 0 < r.global_rank <= 500:
+                c.tracked_text(after, mid1 - 4, f"#{r.global_rank}", 8, FAINT, True, "la", 0.8)
+            if r.rank_badge:
+                c.icon(r.rank_badge, x + 274, top + 5, 20, 20, cut=4, border=LINE_2, bg=PANEL)
+
+            c.text(x + 360, mid1, f"{_fmt(r.kills)}/{_fmt(r.deaths)}/{_fmt(r.assists)}", 13, TEXT, True, "lm")
+            if r.kill_part is not None:
+                c.text(x + 455, mid1, _pct(r.kill_part), 12, TEXT, True, "lm")
+            if r.accuracy is not None:
+                c.text(x + 510, mid1, _pct(r.accuracy), 12, MUTED, True, "lm")
+            if r.damage is not None:
+                c.text(x + w - 170, mid1, _fmt(r.damage, "{:,.0f}"), 12, BRASS, True, "rm")
+            if r.obj_damage is not None:
+                c.text(x + w - 95, mid1, _fmt(r.obj_damage, "{:,.0f}"), 12, STEEL, True, "rm")
+            if r.damage_taken is not None:
+                c.text(x + w - 24, mid1, _fmt(r.damage_taken, "{:,.0f}"), 12, RED, True, "rm")
+
+            # second line: level, net worth, healing (+ dpm/spm when known)
+            details = []
+            if r.level is not None:
+                details.append((f"Lv {r.level}", TEXT))
+            if r.net_worth is not None:
+                details.append((f"{_fmt(r.net_worth, '{:,.0f}')} souls", MINT))
+            if r.healing is not None:
+                details.append((f"Heal {_fmt(r.healing, '{:,.0f}')}", GREEN))
+            if r.dmg_per_min is not None:
+                details.append((f"{_fmt(r.dmg_per_min, '{:,.0f}')}/min dmg", MUTED))
+            if r.souls_per_min is not None:
+                details.append((f"{_fmt(r.souls_per_min, '{:,.0f}')}/min souls", MUTED))
+            dx = nx
+            for j, (txt, tcol) in enumerate(details):
+                if j:
+                    c.text(dx, mid2, "·", 9, FAINT, False, "lm")
+                    dx += c.text_w("·", 9, False) + 8
+                c.text(dx, mid2, txt, 10, tcol, False, "lm")
+                dx += c.text_w(txt, 10, False) + 8
+                if dx > x + w - 40:
+                    break
+
+            if i < len(team.rows) - 1:
+                c.divider(x + 24, yy + SCORE_ROW_H, w - 48, LINE)
+            yy += SCORE_ROW_H
+        yy += 6
+    return h
+
+
+@dataclass
 class HeroRow:
     name: str
     games: int
@@ -853,12 +989,15 @@ class MatchCardData:
     brawl_round_avg_s: int | None = None
     own_lobby_rank: str | None = None
     enemy_lobby_rank: str | None = None
+    own_lobby_rank_badge: bytes | None = None
+    enemy_lobby_rank_badge: bytes | None = None
     rank_name: str | None = None        # player's own current rank (e.g. "Archon 3")
     rank_prev: str | None = None        # rank before this match, when it moved
     rank_up: bool | None = None         # True promoted, False demoted, None no change
     rank_badge: bytes | None = None
     pp_score: int | None = None
     pp_delta: int | None = None         # change since the last match tracked for this player
+    scoreboard: Scoreboard | None = None
     statlocker: bool = False
 
 
@@ -875,7 +1014,12 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     party = d.party[:5]  # a party is at most six including you
     party_h = 58 + len(party) * PARTY_ROW_H if party else 0
     y_party = y_items + items_h + 14
-    y_end = (y_party + party_h) if party else (y_items + items_h)
+    board = d.scoreboard if d.scoreboard and (d.scoreboard.own.rows or d.scoreboard.enemy.rows) else None
+    score_h = (46 + sum(30 + max(1, len(t.rows)) * SCORE_ROW_H + 6
+                        for t in (board.own, board.enemy)) + 4) if board else 0
+    after_party = (y_party + party_h) if party else (y_items + items_h)
+    y_score = after_party + 14 if board else None
+    y_end = (y_score + score_h) if board else after_party
     y = y_end + 18 + (26 if has_lobby else 0)
     c = Canvas(1000, y + 48)
 
@@ -987,12 +1131,23 @@ def render_match_card(d: MatchCardData) -> io.BytesIO:
     if party:
         _party_panel(c, 40, y_party, 920, party_h, party)
 
+    # scoreboard -----------------------------------------------------------
+    if board:
+        _scoreboard_panel(c, 40, y_score, 920, board)
+
     # lobby + footer --------------------------------------------------------
     y = y_end + 18
     if has_lobby:
         c.tracked_text(40, y, "LOBBY AVERAGE RANK", 9, FAINT, True, "la", 2.0)
         lx = 40 + c.tracked_w("LOBBY AVERAGE RANK", 9, True, 2.0) + 18
-        lx += c.tag(lx, y - 5, f"YOUR TEAM · {d.own_lobby_rank or '-'}", GREEN, size=9) + 10
+        own_label = f"YOUR TEAM · {d.own_lobby_rank or '-'}"
+        if d.own_lobby_rank_badge:
+            c.icon(d.own_lobby_rank_badge, lx, y - 6, 18, 18, cut=4, border=LINE_2, bg=PANEL)
+            lx += 22
+        lx += c.tag(lx, y - 5, own_label, GREEN, size=9) + 10
+        if d.enemy_lobby_rank_badge:
+            c.icon(d.enemy_lobby_rank_badge, lx, y - 6, 18, 18, cut=4, border=LINE_2, bg=PANEL)
+            lx += 22
         c.tag(lx, y - 5, f"ENEMY TEAM · {d.enemy_lobby_rank or '-'}", RED, size=9)
         y += 26
     c.divider(40, y + 6, 920, LINE, major=True)

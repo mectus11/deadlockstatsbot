@@ -89,6 +89,32 @@ class LobbyInfo:
     enemy_rank: int | None
 
 
+@dataclass
+class MatchPlayer:
+    account_id: int
+    team: str | None = None
+    hero_id: int | None = None
+    kills: int | None = None
+    deaths: int | None = None
+    assists: int | None = None
+    net_worth: int | None = None
+    hero_damage: int | None = None
+    obj_damage: int | None = None
+    damage_taken: int | None = None
+    healing: int | None = None
+    level: int | None = None
+    name: str | None = None
+    avatar_url: str | None = None
+    rank_number: int | None = None
+    mvp_score: float | int | None = None
+    team_mvp_place: int | None = None
+    global_rank: int | None = None
+    kill_part: float | None = None      # 0..1 or 0..100 depending on API
+    accuracy: float | None = None       # 0..1 or 0..100
+    dmg_per_min: float | None = None
+    souls_per_min: float | None = None
+
+
 def _ago(ts: float) -> str:
     secs = max(0, int(time.time() - ts))
     if secs < 60:
@@ -139,6 +165,13 @@ def parse_profile(d: dict) -> Profile:
                    calibration_matches=_int(d.get("calibrationMatches")), region=region)
 
 
+def _pick(d: dict, *names):
+    for n in names:
+        if n in d and d[n] is not None:
+            return d[n]
+    return None
+
+
 def parse_lobby(match: dict, account_id: int) -> LobbyInfo | None:
     """Mean rank of the player's team vs the enemy team in this match."""
     amber = match.get("amberHandMeanPPScoreRankNumber")
@@ -146,13 +179,64 @@ def parse_lobby(match: dict, account_id: int) -> LobbyInfo | None:
     if amber is None and sapphire is None:
         return None
     for p in match.get("players") or []:
-        if str(p.get("account_id")) == str(account_id):
-            team = str(p.get("team", "")).lower()
+        if str(_pick(p, "account_id", "accountId")) == str(account_id):
+            team = str(_pick(p, "team") or "").lower()
             if "amber" in team:
                 return LobbyInfo(amber, sapphire)
             if "sapphire" in team:
                 return LobbyInfo(sapphire, amber)
     return None
+
+
+def _num(v) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_match_players(match: dict) -> list[MatchPlayer]:
+    """Per-player enrichment from a Statlocker match payload (best-effort)."""
+    out: list[MatchPlayer] = []
+    for p in match.get("players") or []:
+        if not isinstance(p, dict):
+            continue
+        aid = _int(_pick(p, "account_id", "accountId"))
+        if aid is None:
+            continue
+        sp = p.get("steamProfile") or {}
+        if not isinstance(sp, dict):
+            sp = {}
+        metrics = p.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+        def g(*names):
+            return _pick(p, *names) if _pick(p, *names) is not None else _pick(metrics, *names)
+        out.append(MatchPlayer(
+            account_id=aid,
+            team=_pick(p, "team"),
+            hero_id=_int(_pick(p, "hero_id", "heroId")),
+            kills=_int(_pick(p, "kills")),
+            deaths=_int(_pick(p, "deaths")),
+            assists=_int(_pick(p, "assists")),
+            net_worth=_int(_pick(p, "net_worth", "netWorth", "total_souls", "totalSouls")),
+            hero_damage=_int(_pick(p, "player_damage", "playerDamage", "hero_damage", "heroDamage")),
+            obj_damage=_int(g("objectiveDamage", "objective_damage", "bossDamage", "boss_damage")),
+            damage_taken=_int(g("playerDamageTaken", "player_damage_taken", "damageTaken", "damage_taken")),
+            healing=_int(g("playerHealing", "player_healing", "healing")),
+            level=_int(g("level", "heroLevel", "hero_level")),
+            name=_pick(sp, "name", "personaname"),
+            avatar_url=_pick(sp, "avatarUrl", "avatar_url", "avatarfull"),
+            rank_number=_int(_pick(sp, "estimatedRankNumber", "estimated_rank_number", "rankNumber", "rank_number")),
+            mvp_score=_pick(p, "mvpScore", "mvp_score"),
+            team_mvp_place=_int(_pick(p, "teamMvpPlacement", "team_mvp_placement")),
+            global_rank=_int(_pick(p, "globalRank", "global_rank")),
+            kill_part=_num(g("killParticipation", "kill_participation", "kp")),
+            accuracy=_num(g("accuracy", "shotAccuracy", "shot_accuracy")),
+            dmg_per_min=_num(g("damagePerMin", "damage_per_min", "dpm", "heroDamagePerMin", "hero_damage_per_min")),
+            souls_per_min=_num(g("soulsPerMinute", "souls_per_min", "netWorthPerMin", "net_worth_per_min", "spm")),
+        ))
+    return out
 
 
 class StatlockerAPI:

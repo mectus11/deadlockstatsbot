@@ -199,44 +199,6 @@ class StatsBot(discord.Client):
         detail = await self.dl.match_detail(m.match_id, account_id)
         return merge_match(m, detail) if detail else m
 
-    async def party_members(self, m: Match, account_id: int,
-                            heroes: dict) -> list[cards.PartyMemberView]:
-        """Same-party mates for one match, with hero art and Steam names. Empty
-        when metadata is missing, nobody partied, or the lookup fails."""
-        if not m.roster:
-            return []
-        mates = await self.dl.mate_stats(account_id, m.match_id, m.game_mode)
-        rows = [p for p in m.roster
-                if p.account_id in mates and p.account_id != account_id
-                and (m.team is None or p.team == m.team)]  # same_party is same-team already
-        rows.sort(key=lambda p: p.player_slot if p.player_slot is not None else 99)
-        rows = rows[:5]  # a party is at most six including you
-        if not rows:
-            return []
-        profiles = await self.dl.steam_profiles([p.account_id for p in rows])
-        urls = []
-        for p in rows:
-            hero, profile = heroes.get(p.hero_id), profiles.get(p.account_id)
-            urls.extend([hero.image if hero else None, profile.avatar_url if profile else None])
-        pics = await self.images.get_many(urls)
-        out = []
-        for p in rows:
-            hero, profile = heroes.get(p.hero_id), profiles.get(p.account_id)
-            if hero:
-                hero_name = hero.name
-            elif p.hero_id is not None:
-                hero_name = f"Hero #{p.hero_id}"
-            else:
-                hero_name = "Unknown hero"
-            out.append(cards.PartyMemberView(
-                name=(profile.name if profile else None) or f"Account {p.account_id}",
-                hero=hero_name, kills=p.kills, deaths=p.deaths, assists=p.assists,
-                net_worth=p.net_worth,
-                hero_icon=pics.get(hero.image) if hero and hero.image else None,
-                avatar=pics.get(profile.avatar_url) if profile and profile.avatar_url else None,
-            ))
-        return out
-
     async def cached_profile(self, account_id: int, ttl: int = 600) -> Profile | None:
         """Profile with a TTL cache, for /top: one ladder must not spend one API call per
         linked player on every use. Match cards stay uncached — a stale PP would skew deltas."""
@@ -282,12 +244,16 @@ class StatsBot(discord.Client):
         known = [a for _, a in catalogued if a and a.slot in SHOP_SLOTS]
         unknown = sum(1 for _, a in catalogued if a is None)
         own = {a.id: self.local.get(a.name, a.tier) for a in known}  # your files in assets/items win
-        party = await self.party_members(m, account_id, heroes)
 
         # scoreboard (metadata roster) + optional Statlocker enrichment, best-effort
         scoreboard = None
         sl_players: dict[int, "object"] = {}
+        party_ids: set[int] = set()
         if m.roster:
+            mates = await self.dl.mate_stats(account_id, m.match_id, m.game_mode)
+            party_ids = {p.account_id for p in m.roster
+                         if p.account_id in mates and p.account_id != account_id
+                         and (m.team is None or p.team == m.team)}
             if self.sl.enabled:
                 sl_match = await self.sl.match(m.match_id)
                 if isinstance(sl_match, dict):
@@ -308,41 +274,11 @@ class StatsBot(discord.Client):
             badge_urls = [u for u in rank_urls.values() if u]
             board_pics = await self.images.get_many([u for u in hero_urls if u] + badge_urls)
             own_team = m.team
-            own_rows, enemy_rows = [], []
-            for rp in m.roster:
-                h = heroes.get(rp.hero_id)
-                sp = sl_players.get(rp.account_id)
-                steam_p = steam_profiles.get(rp.account_id)
-                name = (getattr(sp, "name", None) or (steam_p.name if steam_p else None)
-                        or f"Account {rp.account_id}")
-                hero_name = h.name if h else (f"Hero #{rp.hero_id}" if rp.hero_id is not None else "Unknown hero")
-                rbadge = board_pics.get(rank_urls.get(rp.account_id)) if rank_urls.get(rp.account_id) else None
-                hicon = board_pics.get(h.image) if h and h.image else None
-                row = cards.ScoreRow(
-                    hero=hero_name, name=name,
-                    kills=rp.kills, deaths=rp.deaths, assists=rp.assists,
-                    net_worth=rp.net_worth,
-                    damage=getattr(sp, "hero_damage", None),
-                    hero_icon=hicon, rank_badge=rbadge,
-                    is_self=(rp.account_id == account_id),
-                    mvp=(getattr(sp, "team_mvp_place", None) == 1),
-                    global_rank=getattr(sp, "global_rank", None),
-                )
-                if own_team is not None and rp.team == own_team:
-                    own_rows.append(row)
-                elif own_team is not None:
-                    enemy_rows.append(row)
-                else:
-                    own_rows.append(row)
             def slot_key(p):
                 try:
                     return int(p.player_slot) if p.player_slot is not None else 99
                 except (TypeError, ValueError):
                     return 99
-            roster_by_id = {p.account_id: p for p in m.roster}
-            # rows were appended in roster order but keep that; ensure stable by player_slot
-            # shortcut: build in roster order then split kept order; sort each side by slot
-            # (rebuild to preserve order)
             own_order = [p for p in m.roster if own_team is not None and p.team == own_team]
             enemy_order = [p for p in m.roster if own_team is not None and p.team != own_team]
             if own_team is None:
@@ -365,6 +301,7 @@ class StatsBot(discord.Client):
                         damage=getattr(sp, "hero_damage", None),
                         hero_icon=hicon, rank_badge=rbadge,
                         is_self=(rp.account_id == account_id),
+                        is_party=(rp.account_id in party_ids),
                         mvp=(getattr(sp, "team_mvp_place", None) == 1),
                         global_rank=getattr(sp, "global_rank", None),
                         kill_part=getattr(sp, "kill_part", None),
@@ -411,7 +348,6 @@ class StatsBot(discord.Client):
             avatar=pics.get(identity.avatar_url) if identity.avatar_url else None,
             items=[cards.ItemView(a.name, own[a.id] or pics.get(a.image), a.slot, a.tier) for a in known],
             unnamed_items=unknown,
-            party=party,
             own_lobby_rank=rank_name(lobby.own_rank) if lobby else None,
             enemy_lobby_rank=rank_name(lobby.enemy_rank) if lobby else None,
             own_lobby_rank_badge=pics.get(own_lobby_badge_url) if own_lobby_badge_url else None,

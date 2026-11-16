@@ -210,8 +210,15 @@ def parse_match_players(match: dict) -> list[MatchPlayer]:
         metrics = p.get("metrics") or {}
         if not isinstance(metrics, dict):
             metrics = {}
+        stats = p.get("stats") or p.get("matchStats") or p.get("match_stats") or {}
+        if not isinstance(stats, dict):
+            stats = {}
         def g(*names):
-            return _pick(p, *names) if _pick(p, *names) is not None else _pick(metrics, *names)
+            for src in (p, metrics, stats):
+                v = _pick(src, *names)
+                if v is not None:
+                    return v
+            return None
         out.append(MatchPlayer(
             account_id=aid,
             team=_pick(p, "team"),
@@ -221,10 +228,13 @@ def parse_match_players(match: dict) -> list[MatchPlayer]:
             assists=_int(_pick(p, "assists")),
             net_worth=_int(_pick(p, "net_worth", "netWorth", "total_souls", "totalSouls")),
             hero_damage=_int(_pick(p, "player_damage", "playerDamage", "hero_damage", "heroDamage")),
-            obj_damage=_int(g("objectiveDamage", "objective_damage", "bossDamage", "boss_damage")),
-            damage_taken=_int(g("playerDamageTaken", "player_damage_taken", "damageTaken", "damage_taken")),
-            healing=_int(g("playerHealing", "player_healing", "healing")),
-            level=_int(g("level", "heroLevel", "hero_level")),
+            obj_damage=_int(g("objectiveDamage", "objective_damage", "objDamage", "obj_damage",
+                              "bossDamage", "boss_damage", "objective_damage_dealt")),
+            damage_taken=_int(g("playerDamageTaken", "player_damage_taken", "damageTaken", "damage_taken",
+                                "totalDamageTaken", "total_damage_taken")),
+            healing=_int(g("playerHealing", "player_healing", "healing", "heroHealing", "hero_healing",
+                           "totalHealing", "total_healing", "healingDone", "healing_done")),
+            level=_int(g("level", "heroLevel", "hero_level", "playerLevel", "player_level")),
             name=_pick(sp, "name", "personaname"),
             avatar_url=_pick(sp, "avatarUrl", "avatar_url", "avatarfull"),
             rank_number=_int(_pick(sp, "estimatedRankNumber", "estimated_rank_number", "rankNumber", "rank_number")),

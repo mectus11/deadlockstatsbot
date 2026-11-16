@@ -667,12 +667,16 @@ class MatchCardStats(unittest.TestCase):
                              pp_score=900, pp_delta=-40)
         self.assertGreater(len(demoted.getvalue()), 0)
 
-    def test_renders_party_panel(self):
+    def test_renders_scoreboard_party_markers(self):
         import cards
-        party = [cards.PartyMemberView("Mectus", "Abrams", 7, 5, 19, 41230),
-                 cards.PartyMemberView("Nyx", "Haze", 14, 2, 9, 52880),
-                 cards.PartyMemberView("Unknown", "Hero #99", None, None, None, None)]
-        png = self._card(party=party, stats=MatchStats(hero_damage=1))
+        own = cards.ScoreTeam("Amber Hand", True, [
+            cards.ScoreRow("Infernus", "Me", 10, 2, 8, 30000, 15000, is_self=True, mvp=True),
+            cards.ScoreRow("Abrams", "Mate", 7, 5, 19, 41230, 12450, is_party=True),
+        ])
+        enemy = cards.ScoreTeam("Sapphire Flame", False, [
+            cards.ScoreRow("Seven", "Foe", 3, 9, 4, 18000, 7000),
+        ])
+        png = self._card(scoreboard=cards.Scoreboard(own=own, enemy=enemy), stats=MatchStats(hero_damage=1))
         self.assertGreater(len(png.getvalue()), 0)
 
     def test_renders_scoreboard_and_lobby_badges(self):

@@ -299,24 +299,25 @@ class StatsBot(discord.Client):
                     rbadge = board_pics.get(rank_urls.get(rp.account_id)) if rank_urls.get(rp.account_id) else None
                     hicon = board_pics.get(h.image) if h and h.image else None
                     av = board_pics.get(avatar_urls.get(rp.account_id)) if avatar_urls.get(rp.account_id) else None
+                    sp_acc = getattr(sp, "accuracy", None)
                     out.append(cards.ScoreRow(
                         hero=hero_name, name=name,
                         kills=rp.kills, deaths=rp.deaths, assists=rp.assists,
                         net_worth=rp.net_worth,
-                        damage=getattr(sp, "hero_damage", None),
+                        damage=getattr(sp, "hero_damage", None) if getattr(sp, "hero_damage", None) is not None else getattr(rp, "hero_damage", None),
                         hero_icon=hicon, rank_badge=rbadge, avatar=av,
                         is_self=(rp.account_id == account_id),
                         is_party=(rp.account_id in party_ids),
                         mvp=(getattr(sp, "team_mvp_place", None) == 1),
                         global_rank=getattr(sp, "global_rank", None),
                         kill_part=getattr(sp, "kill_part", None),
-                        obj_damage=getattr(sp, "obj_damage", None),
+                        obj_damage=getattr(sp, "obj_damage", None) if getattr(sp, "obj_damage", None) is not None else getattr(rp, "obj_damage", None),
                         dmg_per_min=getattr(sp, "dmg_per_min", None),
                         souls_per_min=getattr(sp, "souls_per_min", None),
-                        accuracy=getattr(sp, "accuracy", None),
-                        damage_taken=getattr(sp, "damage_taken", None),
-                        healing=getattr(sp, "healing", None),
-                        level=getattr(sp, "level", None),
+                        accuracy=sp_acc if sp_acc is not None else getattr(rp, "accuracy", None),
+                        damage_taken=getattr(sp, "damage_taken", None) if getattr(sp, "damage_taken", None) is not None else getattr(rp, "damage_taken", None),
+                        healing=getattr(sp, "healing", None) if getattr(sp, "healing", None) is not None else getattr(rp, "healing", None),
+                        level=getattr(sp, "level", None) if getattr(sp, "level", None) is not None else getattr(rp, "level", None),
                     ))
                 return out
             own_rows = rows_for(own_order)

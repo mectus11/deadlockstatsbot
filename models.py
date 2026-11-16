@@ -78,6 +78,12 @@ class RosterPlayer:
     assists: int | None = None
     net_worth: int | None = None
     player_slot: int | None = None
+    hero_damage: int | None = None
+    obj_damage: int | None = None
+    damage_taken: int | None = None
+    healing: int | None = None
+    level: int | None = None
+    accuracy: float | None = None
 
 
 @dataclass
@@ -276,6 +282,11 @@ def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Ma
         aid = _int(p.get("account_id"))
         if aid is None:
             continue
+        ps = _last_stats(p)
+        acc = None
+        if ps and ps.shots_hit is not None and ps.shots_missed is not None:
+            total = ps.shots_hit + ps.shots_missed
+            acc = ps.shots_hit / total * 100 if total else None
         roster.append(RosterPlayer(
             account_id=aid,
             hero_id=_int(_pick(p, "hero_id")),
@@ -285,6 +296,12 @@ def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Ma
             assists=_int(_pick(p, "assists", "player_assists")),
             net_worth=_int(_pick(p, "net_worth")),
             player_slot=_int(_pick(p, "player_slot")),
+            hero_damage=ps.hero_damage if ps else None,
+            obj_damage=ps.boss_damage if ps else None,
+            damage_taken=ps.damage_taken if ps else None,
+            healing=ps.healing if ps else None,
+            level=_int(_pick(p, "level")) or (ps.level if ps else None),
+            accuracy=acc,
         ))
     buys = []
     for it in me.get("items") or []:

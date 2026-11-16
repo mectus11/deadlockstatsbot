@@ -307,8 +307,9 @@ sample_stats = MatchStats(
     neutral_kills=2, bullet_kills=9, melee_kills=1, ability_kills=4, headshot_kills=1, level=24)
 match_data = cards.MatchCardData(
     won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items,
-    own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3", rank_name="Oracle 4", pp_score=4250,
-    pp_delta=86, statlocker=True, mode="Ranked", mode_kind="ranked", stats=sample_stats, **common)
+    own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3", rank_name="Oracle 4",
+    rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True, mode="Ranked",
+    mode_kind="ranked", stats=sample_stats, **common)
 save("match.png", cards.render_match_card(match_data))
 save("match_brawl.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(6), avatar=fake_icon(3), items=items[:8], mode="Street Brawl",
@@ -318,13 +319,14 @@ save("match_bot.png", cards.render_match_card(cards.MatchCardData(
     stats=sample_stats, **common)))
 save("match_loss_few_items.png", cards.render_match_card(cards.MatchCardData(
     won=False, hero_icon=fake_icon(2), items=items[:5], unnamed_items=2, rank_name="Archon 3",
-    pp_score=3690, pp_delta=-54, statlocker=True, mode="Standard", mode_kind="standard",
-    stats=sample_stats, **common)))
+    rank_badge=fake_icon(7), pp_score=3690, pp_delta=-54, statlocker=True, mode="Standard",
+    mode_kind="standard", stats=sample_stats, **common)))
 save("match_sparse.png", cards.render_match_card(cards.MatchCardData(
     name="Account 123456789", hero="Hero #99", match_id=1, won=None, kills=None, deaths=None,
     assists=None, duration_s=None, start_time=None, net_worth=None, last_hits=None, denies=None)))
 save("match_many_items.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(4), items=items * 2, mode="Ranked", mode_kind="ranked",
+    rank_name="Oracle 4", rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True,
     stats=sample_stats, **common)))
 party = [
     cards.PartyMemberView("Mectus", "Abrams", 7, 5, 19, 41230, fake_icon(5), fake_icon(3)),
@@ -334,8 +336,8 @@ party = [
 save("match_party.png", cards.render_match_card(cards.MatchCardData(
     won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items,
     party=party, own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3", rank_name="Oracle 4",
-    pp_score=4250, pp_delta=86, statlocker=True, mode="Ranked", mode_kind="ranked",
-    stats=sample_stats, **common)))
+    rank_badge=fake_icon(5), pp_score=4250, pp_delta=86, statlocker=True, mode="Ranked",
+    mode_kind="ranked", stats=sample_stats, **common)))
 save("match_party_full.png", cards.render_match_card(cards.MatchCardData(
     won=False, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items[:8],
     party=party + [
@@ -368,6 +370,12 @@ for level in ("minimal", "balanced", "ornate"):
 
 # display-face comparison (balanced density, print texture)
 cards.ORNAMENT_LEVEL = "balanced"
+# one extra preview to showcase rank transition + badge on the card
+save("match_rankup.png", cards.render_match_card(cards.MatchCardData(
+    won=True, hero_icon=fake_icon(1, tall=True), avatar=fake_icon(3), items=items[:10],
+    own_lobby_rank="Oracle 5", enemy_lobby_rank="Oracle 3", rank_name="Phantom 1",
+    rank_prev="Oracle 4", rank_up=True, rank_badge=fake_icon(5), pp_score=4312, pp_delta=38,
+    statlocker=True, mode="Ranked", mode_kind="ranked", stats=sample_stats, **common)))
 for face in ("cinzel", "bodoni", "marcellus"):
     cards.set_display_face(face)
     _write(OUT / f"style-{face}.png", style_sheet("balanced"))

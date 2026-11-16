@@ -283,7 +283,9 @@ class StatsBot(discord.Client):
         unknown = sum(1 for _, a in catalogued if a is None)
         own = {a.id: self.local.get(a.name, a.tier) for a in known}  # your files in assets/items win
         party = await self.party_members(m, account_id, heroes)
+        badge_url = rank_badge_url(snap.rank_after)
         pics = await self.images.get_many([hero.image if hero else None, identity.avatar_url,
+                                           badge_url,
                                            *(a.image for a in known if not own[a.id])])
         mode_kind, mode = match_type(m)
         return cards.render_match_card(cards.MatchCardData(
@@ -304,6 +306,7 @@ class StatsBot(discord.Client):
             rank_name=rank_name(snap.rank_after),
             rank_prev=rank_name(snap.rank_before) if snap.rank_changed else None,
             rank_up=snap.promoted if snap.rank_changed else None,
+            rank_badge=pics.get(badge_url) if badge_url else None,
             pp_score=snap.pp_after,
             pp_delta=snap.pp_delta,
             statlocker=bool(profile or lobby),
@@ -421,6 +424,8 @@ class StatsBot(discord.Client):
         rows = self.db.cards_awaiting_rank(int(time.time()) - BACKFILL_WINDOW,
                                            limit=BACKFILL_PER_CYCLE,
                                            max_attempts=BACKFILL_ATTEMPTS)
+        if rows:
+            await self.sl.matches([r["match_id"] for r in rows])  # prime lobby data in one batch
         for row in rows:
             channel = self.get_channel(row["channel_id"])
             if channel is None:
@@ -939,7 +944,6 @@ async def latestmatch(interaction: discord.Interaction, steamid: str | None = No
 
 TOP_LIMIT = 10
 TOP_MAX_ACCOUNTS = 100  # shortcut: links beyond this aren't fetched; raise if a server gets huge
-TOP_CONCURRENCY = 4
 
 
 @bot.tree.command(name="top", description="Best ranked players linked in this server")
@@ -952,19 +956,28 @@ async def top(interaction: discord.Interaction):
     links = bot.db.links_for_guild(interaction.guild_id)
     if not links:
         return await interaction.followup.send("Nobody here is linked yet — `/link` to join.")
-    sem = asyncio.Semaphore(TOP_CONCURRENCY)
-
-    async def fetch(link):
-        async with sem:
-            return link, await bot.cached_profile(link.account_id)
-
     checked = links[:TOP_MAX_ACCOUNTS]
+    now = time.time()
+    profiles: dict[int, Profile | None] = {}
+    missing: list[int] = []
+    for link in checked:
+        hit = bot._profiles.get(link.account_id)
+        if hit and now - hit[0] < 600:
+            profiles[link.account_id] = hit[1]
+        else:
+            missing.append(link.account_id)
+    if missing:
+        fetched = await bot.sl.profiles(missing)  # one batch account request (up to 100)
+        for aid in missing:
+            p = fetched.get(aid)
+            bot._profiles[aid] = (now, p)
+            profiles[aid] = p
     entries = []
-    for link, profile in await asyncio.gather(*(fetch(link) for link in checked)):
+    for link in checked:
         member = interaction.guild.get_member(link.discord_id)
         name = member.display_name if member else None
         name = name or link.display_name or f"Account {link.account_id}"
-        entries.append((discord.utils.escape_markdown(name), profile))
+        entries.append((discord.utils.escape_markdown(name), profiles.get(link.account_id)))
     body, shown, unranked = format_top(entries, limit=TOP_LIMIT)
     if not shown:
         return await interaction.followup.send(

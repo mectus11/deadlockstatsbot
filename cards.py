@@ -764,12 +764,14 @@ def _scoreboard_panel(c: Canvas, x, y, w, b: Scoreboard) -> int:
     h = 46 + sum(30 + max(1, len(t.rows)) * SCORE_ROW_H + 6 for t in teams) + 4
     c.panel(x, y, w, h)
     c.panel_header(x + 24, y + 16, w - 48, "SCOREBOARD", None)
-    # top row: combat; bottom row: level/econ/survivability (Statlocker when available)
+    # top row: combat/econ; bottom row: level and rates (Statlocker when available)
     c.tracked_text(x + 360, y + 18, "K / D / A", 8, FAINT, True, "la", 1.4)
-    c.tracked_text(x + 455, y + 18, "KP", 8, FAINT, True, "la", 1.4)
-    c.tracked_text(x + 510, y + 18, "ACC", 8, FAINT, True, "la", 1.4)
-    c.tracked_text(x + w - 170, y + 18, "DMG", 8, FAINT, True, "ra", 1.4)
-    c.tracked_text(x + w - 95, y + 18, "OBJ", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + 450, y + 18, "KP", 8, FAINT, True, "la", 1.4)
+    c.tracked_text(x + 500, y + 18, "ACC", 8, FAINT, True, "la", 1.4)
+    c.tracked_text(x + w - 300, y + 18, "DMG", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 225, y + 18, "HEAL", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 150, y + 18, "SOULS", 8, FAINT, True, "ra", 1.4)
+    c.tracked_text(x + w - 85, y + 18, "OBJ", 8, FAINT, True, "ra", 1.4)
     c.tracked_text(x + w - 24, y + 18, "TAKEN", 8, FAINT, True, "ra", 1.4)
     yy = y + 46
     for team in teams:
@@ -793,7 +795,7 @@ def _scoreboard_panel(c: Canvas, x, y, w, b: Scoreboard) -> int:
             c.icon(r.hero_icon, x + 24, top + 3, 30, 30, cut=5, border=col, label=r.hero,
                    focus=(0.5, 0.3), bg=PANEL_2, width=1)
             nx = x + 62
-            name = c.fit(r.name, 12, True, 180, family="body")
+            name = c.fit(r.name, 12, True, 170, family="body")
             c.text(nx, mid1, name, 12, TEXT if r.is_self else MUTED, True, "lm", family="body")
             after = nx + c.text_w(name, 12, True) + 6
             if r.mvp:
@@ -805,24 +807,26 @@ def _scoreboard_panel(c: Canvas, x, y, w, b: Scoreboard) -> int:
 
             c.text(x + 360, mid1, f"{_fmt(r.kills)}/{_fmt(r.deaths)}/{_fmt(r.assists)}", 13, TEXT, True, "lm")
             if r.kill_part is not None:
-                c.text(x + 455, mid1, _pct(r.kill_part), 12, TEXT, True, "lm")
+                c.text(x + 450, mid1, _pct(r.kill_part), 12, TEXT, True, "lm")
             if r.accuracy is not None:
-                c.text(x + 510, mid1, _pct(r.accuracy), 12, MUTED, True, "lm")
+                c.text(x + 500, mid1, _pct(r.accuracy), 12, MUTED, True, "lm")
             if r.damage is not None:
-                c.text(x + w - 170, mid1, _fmt(r.damage, "{:,.0f}"), 12, BRASS, True, "rm")
+                c.text(x + w - 300, mid1, _fmt(r.damage, "{:,.0f}"), 12, BRASS, True, "rm")
+            if r.healing is not None:
+                c.text(x + w - 225, mid1, _fmt(r.healing, "{:,.0f}"), 12, GREEN, True, "rm")
+            if r.net_worth is not None:
+                nw = _fmt(r.net_worth, "{:,.0f}")
+                c.text(x + w - 150, mid1, nw, 12, MINT, True, "rm")
+                c.soul(x + w - 150 - c.text_w(nw, 12, True) - 10, mid1, 13)
             if r.obj_damage is not None:
-                c.text(x + w - 95, mid1, _fmt(r.obj_damage, "{:,.0f}"), 12, STEEL, True, "rm")
+                c.text(x + w - 85, mid1, _fmt(r.obj_damage, "{:,.0f}"), 12, STEEL, True, "rm")
             if r.damage_taken is not None:
                 c.text(x + w - 24, mid1, _fmt(r.damage_taken, "{:,.0f}"), 12, RED, True, "rm")
 
-            # second line: level, net worth, healing (+ dpm/spm when known)
+            # second line: level and rates
             details = []
             if r.level is not None:
                 details.append((f"Lv {r.level}", TEXT))
-            if r.net_worth is not None:
-                details.append((f"{_fmt(r.net_worth, '{:,.0f}')} souls", MINT))
-            if r.healing is not None:
-                details.append((f"Heal {_fmt(r.healing, '{:,.0f}')}", GREEN))
             if r.dmg_per_min is not None:
                 details.append((f"{_fmt(r.dmg_per_min, '{:,.0f}')}/min dmg", MUTED))
             if r.souls_per_min is not None:

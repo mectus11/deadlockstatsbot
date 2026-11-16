@@ -25,12 +25,13 @@
 
 ![Match card: win, hero portrait, K/D/A, net worth, combat stats, item build and party panel](docs/match-card.webp)
 
-<p align="center"><em>Auto-posted match card: result, hero, K/D/A, net worth, farm, combat stats, the full item build and the party you queued with.</em></p>
+<p align="center"><em>Auto-posted match card: result, hero, K/D/A, net worth, farm, combat stats, the full item build and a compact panel for the party you queued with. Tap <strong>Scoreboard</strong> for the full 12-player table.</em></p>
 
 - **The headline** — win or loss, hero portrait, match type (Ranked, Standard, Bot, Street Brawl), duration and your Steam avatar.
 - **The numbers** — K/D/A, net worth, last hits, denies, and a 5×2 grid of combat stats: hero damage, damage taken, healing, mitigation, accuracy, creep/boss/neutral damage, crit rate and level.
 - **The build** — every shop item in purchase order, with its real icon, a slot-coloured outline (orange weapon, green vitality, purple spirit) and a tier badge. Up to 24 items; ability upgrades are left out.
-- **The party** — each same-party mate with their hero tile, Steam avatar, hero played, K/D/A and net worth. Hidden entirely when you queue solo.
+- **The party** — a compact panel for each same-party mate: hero and Steam avatars, Steam name, hero, K/D/A and net worth. Hidden entirely when you queue solo.
+- **The scoreboard** — a persistent **Scoreboard** button opens a separate, on-demand 12-player scoreboard card (re-fetched when you press it) with both teams, ranks, MVP/party markers and match stats when available.
 - **Rank, when configured** — PP score, rank badge and lobby average ranks come from Statlocker; without a key the card simply leaves them out.
 
 ## The rest of the kit
@@ -61,7 +62,7 @@ Match cards also cover the less ordinary games — Street Brawl shows the round 
 | `/link <steamid> [name]` | Saves your account and turns on automatic posting of new matches. |
 | `/save <steamid> [name]` | Saves your account without automatic posting; `/stats` and `/latestmatch` use it right away. |
 | `/stats [steamid]` | Overall card: matches, win rate, KDA, souls/min, top heroes with portraits, rank. |
-| `/latestmatch [steamid]` | Full match card for the latest game, including items and party. |
+| `/latestmatch [steamid]` | Full match card for the latest game, including items, a compact party panel, and a Scoreboard button for the full table. |
 | `/matches [steamid] [count]` | Compact list of recent matches: result, hero, mode, KDA (default 10). |
 | `/matchstatus [match_id]` | Checks whether the Deadlock API has ingested a match: scoreboard, metadata, salts, or still queued. Defaults to your latest match. |
 | `/top` | Server ladder of the best-ranked linked players by PP. |
@@ -76,8 +77,7 @@ Match cards also cover the less ordinary games — Street Brawl shows the round 
 | `/unlink` | Forgets your saved account and stops automatic posts for you. |
 
 Right-click a user → **Deadlock stats** for their saved account, or right-click a message containing a Steam ID →
-**Deadlock lookup**. Both reply privately. Every match card has a **Refresh** button that re-renders it with newer
-data (useful when it was posted before item data arrived).
+**Deadlock lookup**. Both reply privately. Match cards with roster data include a **Scoreboard** button that opens the full 12-player scoreboard on demand.
 
 `steamid` can be a SteamID64 (17 digits), a 32-bit account ID, or a `steamcommunity.com/profiles/...` link
 (custom `/id/name` links can't be resolved). Leave it empty to use your saved account. `name` is optional; if you
@@ -93,10 +93,7 @@ matches are posted; at most 3 per cycle. Item data can lag a match by a few minu
 cycles for it before being posted without items. `/pause` stops your posts; `/resume` moves the baseline to the newest
 match first, so a long pause does not flood the channel.
 
-Match cards also show a **PARTY** panel with the mates you queued with. The API has no exact party field, so this uses
-its `same_party` heuristic (same team plus Steam friends at match start). It can miss a non-friend party member or
-include a friend who happened to be on your team. The panel is hidden when no mates are detected, so solo cards look
-unchanged.
+Match cards also show a compact **YOUR PARTY** panel with the mates you queued with. The full 12-player scoreboard is available via the card's **Scoreboard** button, which opens a separate scoreboard card in-channel (re-fetched on demand). The API has no exact party field, so party detection uses its `same_party` heuristic (same team plus Steam friends at match start). It can miss a non-friend party member or include a friend who happened to be on your team. The panel is hidden when no mates are detected, so solo cards look unchanged.
 
 ## Patch notes
 

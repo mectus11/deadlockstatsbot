@@ -262,17 +262,21 @@ class StatsBot(discord.Client):
             # Steam names/avatars for the whole lobby (batch; reuses cache)
             roster_ids = [p.account_id for p in m.roster]
             steam_profiles = await self.dl.steam_profiles(roster_ids)
-            # collect hero icons and rank badges to fetch
+            # collect hero icons, rank badges and Steam avatars to fetch
             rank_urls: dict[int, str | None] = {}
+            avatar_urls: dict[int, str | None] = {}
             for rp in m.roster:
                 sp = sl_players.get(rp.account_id)
+                steam_p = steam_profiles.get(rp.account_id)
                 rank_urls[rp.account_id] = rank_badge_url(getattr(sp, "rank_number", None))
+                avatar_urls[rp.account_id] = steam_p.avatar_url if steam_p else None
             hero_urls = []
             for rp in m.roster:
                 h = heroes.get(rp.hero_id)
                 hero_urls.append(h.image if h else None)
             badge_urls = [u for u in rank_urls.values() if u]
-            board_pics = await self.images.get_many([u for u in hero_urls if u] + badge_urls)
+            board_pics = await self.images.get_many([u for u in hero_urls if u] + badge_urls
+                                                    + [u for u in avatar_urls.values() if u])
             own_team = m.team
             def slot_key(p):
                 try:
@@ -294,12 +298,13 @@ class StatsBot(discord.Client):
                     hero_name = h.name if h else (f"Hero #{rp.hero_id}" if rp.hero_id is not None else "Unknown hero")
                     rbadge = board_pics.get(rank_urls.get(rp.account_id)) if rank_urls.get(rp.account_id) else None
                     hicon = board_pics.get(h.image) if h and h.image else None
+                    av = board_pics.get(avatar_urls.get(rp.account_id)) if avatar_urls.get(rp.account_id) else None
                     out.append(cards.ScoreRow(
                         hero=hero_name, name=name,
                         kills=rp.kills, deaths=rp.deaths, assists=rp.assists,
                         net_worth=rp.net_worth,
                         damage=getattr(sp, "hero_damage", None),
-                        hero_icon=hicon, rank_badge=rbadge,
+                        hero_icon=hicon, rank_badge=rbadge, avatar=av,
                         is_self=(rp.account_id == account_id),
                         is_party=(rp.account_id in party_ids),
                         mvp=(getattr(sp, "team_mvp_place", None) == 1),

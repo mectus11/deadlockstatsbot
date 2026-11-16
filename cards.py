@@ -690,6 +690,7 @@ class ScoreRow:
     damage: int | None
     hero_icon: bytes | None = None
     rank_badge: bytes | None = None
+    avatar: bytes | None = None
     is_self: bool = False
     is_party: bool = False
     mvp: bool = False
@@ -765,6 +766,9 @@ def _scoreboard_panel(c: Canvas, x, y, w, b: Scoreboard) -> int:
                 c.d.rectangle(((x + 10) * c.s, (yy + 6) * c.s, (x + 13) * c.s, (yy + SCORE_ROW_H - 6) * c.s), fill=col)
             c.icon(r.hero_icon, x + 24, top + 3, 30, 30, cut=5, border=col, label=r.hero,
                    focus=(0.5, 0.3), bg=PANEL_2, width=1)
+            if r.avatar:
+                c.icon(r.avatar, x + 44, top + 23, 14, 14, cut=4, border=INK, bg=PANEL_2,
+                       fit="cover", width=1)
             nx = x + 62
             name = c.fit(r.name, 12, True, 170, family="body")
             c.text(nx, mid1, name, 12, TEXT if r.is_self else MUTED, True, "lm", family="body")

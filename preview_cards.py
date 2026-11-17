@@ -386,6 +386,39 @@ save("scoreboard_loss.png", cards.render_scoreboard_card(cards.ScoreboardCardDat
         enemy=cards.ScoreTeam("Sapphire Flame", True, enemy_team.rows)))))
 save("scoreboard_unavailable.png", cards.render_scoreboard_card(cards.ScoreboardCardData(
     match_id=41525917, hero="Infernus", name="ExamplePlayer", won=None, scoreboard=None)))
+
+# build order card previews (button-triggered in bot)
+sample_build = [
+    cards.BuildOrderRow("Extended Magazine", 67, fake_icon(31), "weapon", sold=True),
+    cards.BuildOrderRow("Sprint Boots", 230, fake_icon(32), "vitality", sold=True),
+    cards.BuildOrderRow("Headshot Booster", 245, fake_icon(33), "weapon",
+                        "Landing a headshot deals bonus damage and grants you a short burst of movement speed."),
+    cards.BuildOrderRow("Tesla Bullets", 448, fake_icon(34), "weapon",
+                        "Your bullets have a chance to shock your target. The shock will jump to a nearby enemy."),
+    cards.BuildOrderRow("Healing Rite", 636, fake_icon(35), "vitality",
+                        "Grant Regen and Sprint Speed to the target. Gets dispelled if you take damage from an enemy hero."),
+    cards.BuildOrderRow("Titanic Magazine", 521, fake_icon(36), "weapon"),
+    cards.BuildOrderRow("Trophy Collector", 575, fake_icon(37), "vitality",
+                        "Whenever you score an assist or kill, gain extra sprint, a small amount of healing, and a soul."),
+    cards.BuildOrderRow("Healing Nova", 737, fake_icon(38), "vitality",
+                        "Heal yourself and nearby allies."),
+    cards.BuildOrderRow("Radiant Regeneration", 970, fake_icon(39), "spirit",
+                        "While in-combat, Heal and gain bonus Movement Speed for a short duration when you land a shot."),
+    cards.BuildOrderRow("Healbane", 1181, fake_icon(40), "vitality",
+                        "Your bullets apply a debuff that reduces the healing of the target."),
+    cards.BuildOrderRow("Healing Tempo", 1473, fake_icon(41), "vitality",
+                        "Applying Heal to an ally grants them bonus fire rate and movement speed for a short duration."),
+    cards.BuildOrderRow("Greater Expansion", 1563, fake_icon(42), "spirit",
+                        "Increases the range and effect radius of your abilities and items."),
+    cards.BuildOrderRow("Escalating Exposure", 1855, fake_icon(43), "spirit",
+                        "Dealing spirit damage applies a stacking debuff that increases the spirit damage the target takes."),
+]
+save("build_order.png", cards.render_build_order_card(cards.BuildOrderCardData(
+    match_id=41525919, hero="Lady Geist", name="ExamplePlayer", won=True, mode="Ranked",
+    duration_s=2174, rows=sample_build)))
+save("build_order_unavailable.png", cards.render_build_order_card(cards.BuildOrderCardData(
+    match_id=41525917, hero="Lady Geist", name="ExamplePlayer", won=None)))
+
 save("matches.png", cards.render_matches_card(cards.MatchesCardData(
     name="ExamplePlayer", account_id=123456789, avatar=fake_icon(3), statlocker=True,
     matches=[cards.MatchRow("Infernus", True, 11, 4, 17, 41525919, 1757346341, 2174,

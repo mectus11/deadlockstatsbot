@@ -718,6 +718,28 @@ class Scoreboard:
     enemy: ScoreTeam
 
 
+@dataclass
+class BuildOrderRow:
+    name: str
+    time_s: int | None = None
+    icon: bytes | None = None
+    slot: str | None = None
+    description: str | None = None
+    sold: bool = False  # sold, or merged into an upgrade later
+
+
+@dataclass
+class BuildOrderCardData:
+    match_id: int
+    hero: str
+    name: str
+    won: bool | None
+    mode: str | None = None
+    duration_s: int | None = None
+    rows: list[BuildOrderRow] = field(default_factory=list)
+    more: int = 0  # purchases beyond BUILD_ORDER_MAX_ROWS
+
+
 def _pct(v) -> str:
     if v is None:
         return "-"
@@ -1181,6 +1203,18 @@ class ScoreboardCardData:
     scoreboard: Scoreboard | None = None
 
 
+def _card_header(c: Canvas, result: str, color, hero: str, name: str, meta: str) -> None:
+    """Result/hero left, player name and match meta right. Shared by the on-demand cards."""
+    c.panel(40, 28, 920, 96, rail=color)
+    c.tracked_text(64, 44, result, 34, color, True, "la", 2.4, family="display")
+    c.tracked_text(64, 86, c.fit_tracked(hero.upper(), 16, True, 320, 1.2, "display"), 16,
+                   TEXT, True, "la", 1.2, family="display")
+    c.tracked_text(936, 50, c.fit_tracked(name.upper(), 14, True, 420, 1.0, "display"), 14,
+                   TEXT, True, "ra", 1.0, family="display")
+    c.tracked_text(936, 78, c.fit_tracked(meta.upper(), 9, True, 520, 1.6), 9, MUTED, True,
+                   "ra", 1.6)
+
+
 def render_scoreboard_card(d: ScoreboardCardData) -> io.BytesIO:
     board = d.scoreboard if d.scoreboard and (d.scoreboard.own.rows or d.scoreboard.enemy.rows) else None
     color = GREEN if d.won is True else RED if d.won is False else BRASS
@@ -1193,24 +1227,96 @@ def render_scoreboard_card(d: ScoreboardCardData) -> io.BytesIO:
         score_h = 70
     h = 28 + header_h + 14 + score_h + 28
     c = Canvas(1000, h)
-    c.panel(40, 28, 920, header_h, rail=color)
-    c.tracked_text(64, 44, result, 34, color, True, "la", 2.4, family="display")
-    c.tracked_text(64, 86, c.fit_tracked(d.hero.upper(), 16, True, 320, 1.2, "display"), 16,
-                   TEXT, True, "la", 1.2, family="display")
     meta = f"MATCH #{d.match_id}"
     if d.mode:
         meta += f"  ·  {d.mode.upper()}"
     if d.duration_s:
         meta += f"  ·  {_mmss(d.duration_s)}"
-    c.tracked_text(936, 50, c.fit_tracked(d.name.upper(), 14, True, 420, 1.0, "display"), 14,
-                   TEXT, True, "ra", 1.0, family="display")
-    c.tracked_text(936, 78, c.fit_tracked(meta.upper(), 9, True, 520, 1.6), 9, MUTED, True,
-                   "ra", 1.6)
+    _card_header(c, result, color, d.hero, d.name, meta)
     if board:
         _scoreboard_panel(c, 40, 28 + header_h + 14, 920, board)
     else:
         c.panel(40, 28 + header_h + 14, 920, 70)
         c.tracked_text(64, 28 + header_h + 14 + 28, "SCOREBOARD UNAVAILABLE", 11, MUTED, True, "la", 2.0)
+    return c.png()
+
+
+BUILD_ORDER_MAX_ROWS = 30
+BUILD_ROW_PAD = 8
+BUILD_NAME_H = 16
+BUILD_DESC_SIZE = 10
+BUILD_DESC_H = 12
+BUILD_ICON = 30
+
+
+def _wrap(c: Canvas, txt: str, size: int, max_w: float, max_lines: int) -> list[str]:
+    """Greedy word wrap measured in card pixels; the last line is fitted with an ellipsis."""
+    lines, cur = [], ""
+    for word in txt.split():
+        trial = f"{cur} {word}".strip()
+        if not cur or c.text_w(trial, size, family="body") <= max_w:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = c.fit(lines[-1] + " …", size, False, max_w, family="body")
+    return lines
+
+
+def render_build_order_card(d: BuildOrderCardData) -> io.BytesIO:
+    """Every shop purchase of one player in time order, sold/merged components included."""
+    rows = list(d.rows)[:BUILD_ORDER_MAX_ROWS]
+    color = GREEN if d.won is True else RED if d.won is False else BRASS
+    result = "VICTORY" if d.won is True else "DEFEAT" if d.won is False else "MATCH"
+    text_x, text_w = 152, 936 - 152 - 70  # 70 px kept free for the SOLD tag
+    c = Canvas(1000, 200)  # scratch canvas: the real height depends on the wrapped rows
+    wraps = [_wrap(c, r.description, BUILD_DESC_SIZE, text_w, 3) if r.description else []
+             for r in rows]
+    heights = [max(38, 2 * BUILD_ROW_PAD + BUILD_NAME_H + BUILD_DESC_H * len(lines) + 2)
+               for lines in wraps]
+    rows_h = sum(heights)
+    more_h = 24 if d.more else 0
+    panel_h = (62 + rows_h + more_h + 38) if rows else 70
+    c = Canvas(1000, 28 + 96 + 14 + panel_h + 28)
+    meta = f"MATCH #{d.match_id}"
+    if d.mode:
+        meta += f"  ·  {d.mode.upper()}"
+    if d.duration_s:
+        meta += f"  ·  {_mmss(d.duration_s)}"
+    _card_header(c, result, color, d.hero, d.name, meta)
+    py = 28 + 96 + 14
+    c.panel(40, py, 920, panel_h)
+    c.panel_header(64, py + 16, 872, "BUILD ORDER", "PURCHASE ORDER")
+    if not rows:
+        c.tracked_text(64, py + 32, "NO ITEM DATA FOR THIS MATCH", 11, MUTED, True, "la", 2.0)
+        return c.png()
+    y = py + 62
+    for i, (r, lines, rh) in enumerate(zip(rows, wraps, heights)):
+        mid = y + rh / 2
+        c.text(64, mid, _mmss(r.time_s), 11, FAINT if r.sold else MUTED, True, "lm")
+        c.icon(r.icon, 112, y + (rh - BUILD_ICON) / 2, BUILD_ICON, BUILD_ICON, cut=5,
+               border=LINE_2 if r.sold else SLOT_COLORS.get(r.slot, MUTED),
+               label=r.name, fit="contain", bg=PANEL_2, width=1)
+        c.text(text_x, y + 8, c.fit(r.name, 12, True, text_w, family="body"), 12,
+               MUTED if r.sold else TEXT, True, "la", family="body")
+        for li, line in enumerate(lines):
+            c.text(text_x, y + 26 + li * BUILD_DESC_H, line, BUILD_DESC_SIZE,
+                   FAINT if r.sold else MUTED, False, "la", family="body")
+        if r.sold:
+            c.tracked_text(936, mid, "SOLD", 8, FAINT, True, "rm", 1.4)
+        if i < len(rows) - 1:
+            c.divider(64, y + rh, 872, LINE)
+        y += rh
+    if d.more:
+        c.tracked_text(64, y + 4, f"…AND {d.more} MORE PURCHASE{'S' if d.more != 1 else ''}",
+                       9, MUTED, True, "la", 1.6)
+    c.tracked_text(64, y + more_h + 8,
+                   "TIMES ARE THE MATCH CLOCK · DIMMED ITEMS WERE SOLD OR MERGED INTO AN UPGRADE",
+                   8, FAINT, True, "la", 1.2)
     return c.png()
 
 

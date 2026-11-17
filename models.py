@@ -4,6 +4,7 @@ Field names were matched against the public docs and community projects, not a
 live response, so every lookup accepts several spellings and tolerates gaps.
 Run `probe.py` on your own PC to print the real shapes if something is missing.
 """
+import html
 import re
 from dataclasses import dataclass, field, fields
 
@@ -108,6 +109,7 @@ class Match:
     stats: MatchStats | None = None
     brawl_rounds: list[BrawlRound] = field(default_factory=list)
     items: list[ItemBuy] = field(default_factory=list)  # final build, purchase order
+    buys: list[ItemBuy] = field(default_factory=list)  # every purchase, sold/merged included
     roster: list[RosterPlayer] = field(default_factory=list)  # all players, from metadata only
 
     @property
@@ -131,6 +133,7 @@ class Asset:
     image: str | None = None
     slot: str | None = None  # items only: weapon / vitality / spirit
     tier: int | None = None  # items only
+    description: str | None = None  # items only: plain text, markup stripped
 
 
 def _pick(d: dict, *names):
@@ -330,22 +333,23 @@ def normalize_metadata(data, account_id: int, match_id: int | None = None) -> Ma
         stats=stats,
         brawl_rounds=_brawl_rounds(info),
         items=final_items(buys),
+        buys=buys,
         roster=roster,
     )
 
 
 def merge_match(base: Match, detail: Match) -> Match:
-    """History entry first, metadata fills the gaps; items come from metadata."""
+    """History entry first, metadata fills the gaps; items and purchases come from metadata."""
     vals = {}
     for f in fields(Match):
-        if f.name == "items":
+        if f.name in ("items", "buys"):
             continue
         b, d = getattr(base, f.name), getattr(detail, f.name)
         # an empty list is "missing" for brawl rounds and the roster, otherwise it
         # would shadow the metadata
         vals[f.name] = (b or d) if f.name in ("brawl_rounds", "roster") else (
             b if b is not None else d)
-    return Match(**vals, items=detail.items or base.items)
+    return Match(**vals, items=detail.items or base.items, buys=detail.buys or base.buys)
 
 
 def mate_ids(rows, match_id: int) -> set[int]:
@@ -400,6 +404,33 @@ def _tier(v) -> int | None:
     return int(m.group(1)) if m else None
 
 
+_SVG = re.compile(r"(?is)<svg.*?</svg>")
+_TAG = re.compile(r"<[^>]+>")
+
+
+def _plain_html(text) -> str:
+    """Item descriptions carry <span> markup and inline <svg> icons; keep the words."""
+    text = _SVG.sub(" ", str(text or ""))
+    text = _TAG.sub(" ", text)
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
+    # removing an inline icon leaves a space before the punctuation that followed it
+    return re.sub(r"\s+([,.;:!?%)\]])", r"\1", re.sub(r"\(\s+", "(", text))
+
+
+def _item_description(d: dict) -> str | None:
+    """Prose for one item: the `description` table first, else the tooltip sections'
+    localised strings. Stat-only items (Extended Magazine) have neither."""
+    desc = d.get("description")
+    text = " ".join(str(v) for v in desc.values() if v) if isinstance(desc, dict) \
+        else str(desc or "")
+    if not text.strip():
+        text = " ".join(
+            a.get("loc_string") or ""
+            for s in d.get("tooltip_sections") or [] if isinstance(s, dict)
+            for a in s.get("section_attributes") or [] if isinstance(a, dict))
+    return _plain_html(text) or None
+
+
 def parse_assets(data, image_keys) -> dict[int, Asset]:
     if isinstance(data, dict):
         data = next((v for v in data.values() if isinstance(v, list)), list(data.values()))
@@ -412,7 +443,8 @@ def parse_assets(data, image_keys) -> dict[int, Asset]:
             continue
         out[aid] = Asset(aid, str(name), pick_image(d, image_keys),
                          _slot(_pick(d, "item_slot_type", "slot_type")),
-                         _tier(_pick(d, "item_tier", "tier")))
+                         _tier(_pick(d, "item_tier", "tier")),
+                         _item_description(d))
     return out
 
 

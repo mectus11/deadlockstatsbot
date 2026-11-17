@@ -96,6 +96,40 @@ class ScoreboardButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sco
         await interaction.followup.send("Scoreboard posted.", ephemeral=True)
 
 
+class BuildOrderButton(discord.ui.DynamicItem[discord.ui.Button], template=r"buildorder:(?P<match_id>\d+):(?P<account_id>\d+)"):
+    def __init__(self, bot: "StatsBot", match_id: int, account_id: int):
+        self.bot = bot
+        self.match_id = int(match_id)
+        self.account_id = int(account_id)
+        super().__init__(discord.ui.Button(
+            label="Build Order",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"buildorder:{self.match_id}:{self.account_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str], /):
+        return cls(interaction.client, int(match["match_id"]), int(match["account_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            png = await self.bot.build_build_order_card(self.account_id, self.match_id)
+        except Exception:
+            log.exception("build order failed for match %s account %s", self.match_id, self.account_id)
+            await interaction.followup.send("Couldn't load the build order right now.", ephemeral=True)
+            return
+        if png is None:
+            await interaction.followup.send("Build order unavailable for this match.", ephemeral=True)
+            return
+        channel = interaction.channel
+        if channel is None:
+            await interaction.followup.send("Couldn't post the build order here.", ephemeral=True)
+            return
+        await channel.send(file=discord.File(png, filename=f"buildorder_{self.match_id}.png"))
+        await interaction.followup.send("Build order posted.", ephemeral=True)
+
+
 def _short_mode(m: Match) -> str:
     """Compact label for the /matches list (the latest-match card uses the full one)."""
     kind, label = match_type(m)
@@ -139,7 +173,7 @@ class StatsBot(discord.Client):
         self.poll_patches.start()
         if self.sl.enabled:
             self.backfill_cards.start()  # only useful (and only allowed) with Statlocker access
-        self.add_dynamic_items(ScoreboardButton)
+        self.add_dynamic_items(ScoreboardButton, BuildOrderButton)
         # Re-register the Hero Changes buttons of notes posted before this restart. The Steam
         # link button needs no handler, so only the Hero button view has to be restored.
         stored = [note for note in self.db.all_patch_notes() if note and note.heroes]
@@ -354,6 +388,38 @@ class StatsBot(discord.Client):
             name=name, won=m.won, mode=mode, duration_s=m.duration_s, scoreboard=board,
         ))
 
+    async def build_build_order_card(self, account_id: int, match_id: int,
+                                     fallback_name: str | None = None):
+        """Re-fetch and render every shop purchase of one player, in time order."""
+        history = await self.dl.match_history(account_id)
+        base = next((m for m in history if m.match_id == match_id), None)
+        if base is None:
+            return None
+        m = await self.load_match(account_id, base)
+        catalogue = await self.dl.items()
+        known = sorted(((b, a) for b, a in ((b, catalogue.get(b.item_id)) for b in (m.buys or m.items))
+                        if a and a.slot in SHOP_SLOTS), key=lambda pair: pair[0].bought_s or 0)
+        if not known:
+            return None
+        shown = known[:cards.BUILD_ORDER_MAX_ROWS]
+        own = {a.id: self.local.get(a.name, a.tier) for _, a in shown}  # files in assets/items win
+        pics = await self.images.get_many([a.image for _, a in shown if not own[a.id]])
+        heroes = await self.dl.heroes()
+        hero = heroes.get(m.hero_id)
+        profile, steam = await asyncio.gather(self.sl.profile(account_id), self.dl.steam_profile(account_id))
+        name = fallback_name or (steam.name if steam else None) or (profile.name if profile else None) or f"Account {account_id}"
+        _, mode = match_type(m)
+        return cards.render_build_order_card(cards.BuildOrderCardData(
+            match_id=m.match_id,
+            hero=hero.name if hero else await self.dl.hero_name(m.hero_id),
+            name=name, won=m.won, mode=mode, duration_s=m.duration_s,
+            rows=[cards.BuildOrderRow(
+                name=a.name, time_s=b.bought_s, icon=own[a.id] or pics.get(a.image),
+                slot=a.slot, description=a.description, sold=bool(b.sold_s))
+                for b, a in shown],
+            more=len(known) - len(shown),
+        ))
+
     async def render_match(self, account_id: int, m: Match, fallback_name: str | None = None,
                            track: tuple[int, int] | None = None,
                            snapshot: RankSnapshot | None = None,
@@ -473,6 +539,7 @@ class StatsBot(discord.Client):
         if has_scoreboard:
             view = discord.ui.View(timeout=None)
             view.add_item(ScoreboardButton(self, m.match_id, account_id))
+            view.add_item(BuildOrderButton(self, m.match_id, account_id))
         msg = await target.send(
             content=content,
             file=discord.File(png, filename=f"match_{m.match_id}.png"),

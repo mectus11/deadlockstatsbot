@@ -89,9 +89,13 @@ class Metadata(unittest.TestCase):
 
     def test_final_items_and_merge(self):
         self.assertEqual([i.item_id for i in final_items([ItemBuy(1, 50), ItemBuy(2, 10), ItemBuy(3, 5, 99)])], [2, 1])
+        meta = normalize_metadata(META, 5)
+        self.assertEqual([i.item_id for i in meta.buys], [10, 11, 12, 13])  # every purchase, sold included
+        self.assertEqual(next(i.sold_s for i in meta.buys if i.item_id == 12), 900)
         base = Match(77, hero_id=3, kills=None, won=None)
-        merged = merge_match(base, normalize_metadata(META, 5))
+        merged = merge_match(base, meta)
         self.assertEqual((merged.hero_id, merged.kills, merged.won, len(merged.items)), (3, 7, True, 3))
+        self.assertEqual([i.item_id for i in merged.buys], [10, 11, 12, 13])
         keep = merge_match(Match(77, kills=1), normalize_metadata(META, 5))
         self.assertEqual(keep.kills, 1)  # history value wins when present
 
@@ -130,7 +134,25 @@ class Assets(unittest.TestCase):
                               {"id": 11, "name": "Odd"}, {"name": "no id"}, "junk"], ("image",))
         self.assertEqual((items[10].name, items[10].slot, items[10].tier), ("Basic Mag", "weapon", 2))
         self.assertIsNone(items[11].image)
+        self.assertIsNone(items[10].description)
         self.assertEqual(len(items), 2)
+
+    def test_item_description_is_plain_text(self):
+        items = parse_assets([
+            {"id": 1, "name": "Passive", "item_slot_type": "EItemSlotType_Spirit", "description": {
+                "passive": "While <span class=\"highlight\">below 50% health</span> you gain "
+                           "<svg width=\"128\"><path d=\"M1\"/></svg>2 regen ."}},
+            # description is empty: the prose only lives in the tooltip sections
+            {"id": 2, "name": "Tooltip", "item_slot_type": "EItemSlotType_Weapon",
+             "description": {}, "tooltip_sections": [
+                 {"section_attributes": [{"loc_string": "Your bullets <span>shred</span> resist."},
+                                         {"loc_string": None}]}]},
+            # stat-only item: no prose anywhere
+            {"id": 3, "name": "Stats", "item_slot_type": "EItemSlotType_Vitality", "description": {}},
+        ], ("image",))
+        self.assertEqual(items[1].description, "While below 50% health you gain 2 regen.")
+        self.assertEqual(items[2].description, "Your bullets shred resist.")
+        self.assertIsNone(items[3].description)
 
     def test_ability_upgrades_have_no_shop_slot(self):
         # the catalogue also lists hero ability upgrades; they must not look like weapon/vitality/spirit items
@@ -705,6 +727,26 @@ class ScoreboardCardTests(unittest.TestCase):
         import cards
         png = cards.render_scoreboard_card(cards.ScoreboardCardData(
             match_id=1, hero="Infernus", name="Me", won=False, scoreboard=None))
+        self.assertGreater(len(png.getvalue()), 0)
+
+
+class BuildOrderCardTests(unittest.TestCase):
+    def test_renders_purchases_with_descriptions(self):
+        import cards
+        png = cards.render_build_order_card(cards.BuildOrderCardData(
+            match_id=1, hero="Lady Geist", name="Me", won=True, mode="Ranked", duration_s=2174,
+            rows=[cards.BuildOrderRow("Extended Magazine", 67, None, "weapon", None, sold=True),
+                  cards.BuildOrderRow("Frenzy", 1473, None, "vitality",
+                                      "While below 50% health you gain stat bonuses.", False),
+                  cards.BuildOrderRow("Spirit Rend", 1672, None, "weapon",
+                                      "Your bullets shred spirit resist. " * 12, False)],
+            more=4))
+        self.assertGreater(len(png.getvalue()), 0)
+
+    def test_renders_without_rows(self):
+        import cards
+        png = cards.render_build_order_card(cards.BuildOrderCardData(
+            match_id=1, hero="Ivy", name="Me", won=None))
         self.assertGreater(len(png.getvalue()), 0)
 
 
